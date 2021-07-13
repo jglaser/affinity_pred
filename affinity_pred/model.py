@@ -27,7 +27,8 @@ class MLP(torch.nn.Module):
         return self.layers(x)
 
 class EnsembleSequenceRegressor(torch.nn.Module):
-    def __init__(self, seq_model_name, smiles_model_name, max_seq_length, sparse_attention=True, *args, **kwargs):
+    def __init__(self, seq_model_name, smiles_model_name, max_seq_length, sparse_attention=True,
+                 *args, **kwargs):
         super().__init__()
 
         # enable gradient checkpointing
@@ -78,6 +79,7 @@ class EnsembleSequenceRegressor(torch.nn.Module):
                 seq_config, 'pad_token_id') and seq_config.pad_token_id is not None else 0
 
         if is_deepspeed_zero3_enabled():
+            import deepspeed
             with deepspeed.zero.Init(config=deepspeed_config()):
                 self.cls = MLP(seq_config.hidden_size+smiles_config.hidden_size)
         else:

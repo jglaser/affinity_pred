@@ -20,3 +20,18 @@ OMP_NUM_THREADS=1 jsrun -r 1 -g 6 -a 6 -c 42 python explain_mpro.py \
     --per_device_eval_batch_size=1
 ```
 
+
+### Validate with random predictions due to dropout
+
+```
+deepspeed validate.py \
+    --deepspeed='../train/ds_config.json'\
+    --per_device_eval_batch_size=32\
+    --output_dir=data\
+    --in_file=/home/xvg/pt0c00216_si_002.csv\
+    --out_file=data/kuzikov0.parquet\
+    --seed=42\
+    --checkpoint='../train/ensemble_model_4608/pytorch_model.bin'\
+    --seq='SGFRKMAFPSGKVEGCMVQVTCGTTTLNGLWLDDVVYCPRHVICTSEDMLNPNYEDLLIRKSNHNFLVQAGNVQLRVIGHSMQNCVLKLKVDTANPKTPKYKFVRIQPGQTFSVLACYNGSPSGVYQCAMRPNFTIKGSFLNGSCGSVGFNIDYDCVSFCYMHHMELPTGVHAGTDLEGNFYGPFVDRQTAQAAGTDTTITVNVLAWLYAAVINGDRWFLNRFTTTLNDFNLVAMKYNYEPLTQDHVDILGPLSAQTGIAVLDMCASLKELLQNGMNGRTILGSALLEDEFTPFDVVRQCSGVTFQ'\
+    --smiles_column=Smiles
+```

@@ -28,9 +28,9 @@ class BertSparseSelfAttention(nn.Module):
         assert self.position_embedding_type == "absolute"
 
         self.is_decoder = config.is_decoder
-        self.sparse_self_attention = SparseSelfAttention(sparsity_config, max_seq_length=max_seq_length)
-
-
+        self.sparse_self_attention = SparseSelfAttention(sparsity_config,
+            key_padding_mask_mode='add', # we're padding cross attention keys with -inf..0
+            max_seq_length=max_seq_length)
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -89,7 +89,6 @@ class BertSparseSelfAttention(nn.Module):
             # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
             # if encoder bi-directional self-attention `past_key_value` is always `None`
             past_key_value = (key_layer, value_layer)
-
 
         context_layer = self.sparse_self_attention(query_layer,
                                                    key_layer,

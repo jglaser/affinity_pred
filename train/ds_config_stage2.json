@@ -21,27 +21,6 @@
         "contiguous_gradients": true
     },
 
-    "sparse_attention": {
-        "mode": "fixed",
-        "block": 16,
-        "different_layout_per_head": true,
-        "num_local_blocks": 4,
-        "num_global_blocks": 1,
-        "attention": "bidirectional",
-        "horizontal_global_attention": false,
-        "num_different_global_patterns": 4
-    },
-
-    "optimizer": {
-        "type": "AdamW",
-        "params": {
-            "lr": "auto",
-            "betas": "auto",
-            "eps": "auto",
-            "weight_decay": "auto"
-        }
-    },
-
     "scheduler": {
         "type": "WarmupLR",
         "params": {

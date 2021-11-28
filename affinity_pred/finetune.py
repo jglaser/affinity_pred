@@ -79,8 +79,6 @@ else:
     seq_tokenizer = BertTokenizer.from_pretrained(seq_model_name, do_lower_case=False)
     seq_tokenizer.save_pretrained('seq_tokenizer/')
 
-max_seq_length = min(512,BertConfig.from_pretrained(seq_model_name).max_position_embeddings)
-
 def expand_seqs(seqs):
     input_fixed = ["".join(seq.split()) for seq in seqs]
     input_fixed = [re.sub(r"[UZOB]", "X", seq) for seq in input_fixed]
@@ -126,6 +124,14 @@ class ModelArguments:
 
     n_cross_attention: int = field(
         default=3
+    )
+
+    max_seq_length: int = field(
+        default=512
+    )
+
+    sparse_attention: bool = field(
+        default=False
     )
 
 @dataclass
@@ -187,6 +193,7 @@ def main():
     print('Tokenizer lower_case:', smiles_tokenizer.do_lower_case, flush=True)
 
     max_smiles_length = min(200,BertConfig.from_pretrained(smiles_model_directory).max_position_embeddings)
+    max_seq_length = model_args.max_seq_length
 
     # seed the weight initialization
     torch.manual_seed(training_args.seed)
@@ -265,7 +272,7 @@ def main():
             return optimizer
 
     model = EnsembleSequenceRegressor(seq_model_name, smiles_model_directory,  max_seq_length=max_seq_length,
-                                     sparse_attention=False,
+                                     sparse_attention=model_args.sparse_attention,
                                      n_cross_attention_layers=model_args.n_cross_attention)
 
     trainer = MyTrainer(

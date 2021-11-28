@@ -2,7 +2,7 @@
 #BSUB -P STF006
 #BSUB -W 2:00
 #BSUB -q batch
-#BSUB -nnodes 1600
+#BSUB -nnodes 512
 #BSUB -J finetune_ensemble_regex
 #BSUB -o finetune_ensemble_regex.o%J
 #BSUB -e finetune_ensemble_regex.e%J
@@ -24,32 +24,43 @@ export CXX=`which g++`
 
 export OMP_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
+export TOKENIZERS_PARALLELISM=false
 
 # clear stale lock files
 rm -f `find -name *lock`
 
-for ENSEMBLE_ID in `seq 1 5`; do
-    jsrun -n 320 -g 6 -a 6 -c 42 python ../affinity_pred/finetune.py \
-        --deepspeed='ds_config_rocm.json'\
-        --model_type='regex' \
-        --n_cross_attention=10\
-        --dataset='/gpfs/alpine/world-shared/bip214/binding_affinity'\
-        --split='train'\
-        --output_dir=./results_ensemble_regex_10cross_${ENSEMBLE_ID}\
-        --num_train_epochs=45\
-        --per_device_train_batch_size=32\
-        --per_device_eval_batch_size=32\
-        --warmup_steps=5\
-        --learning_rate=2.5e-4\
-        --weight_decay=0.01\
-        --logging_dir=./logs_ensemble_regex_10cross_${ENSEMBLE_ID}\
-        --logging_steps=1\
-        --evaluation_strategy="epoch"\
-        --gradient_accumulation_steps=1\
-        --fp16=True\
-        --run_name="seq_smiles_affinity"\
-        --save_strategy="epoch"\
-        --seed=$((42+${ENSEMBLE_ID})) &
+# hyperparameters
+export NLAYERS=10
+export LR=1e-4
+export DATASET=no_kras
+export MAX_SEQ_LENGTH=2048
+export BATCH_SIZE=1
+export SPARSE=True
+
+for ENSEMBLE_ID in `seq 1 1`; do
+    jsrun -n 512 -g 6 -a 6 -c 42 python ../affinity_pred/finetune.py \
+    --deepspeed='ds_config_stage2.json'\
+    --model_type='regex' \
+    --dataset='/gpfs/alpine/world-shared/bip214/binding_affinity'\
+    --split=${DATASET}\
+    --sparse_attention=${SPARSE}\
+    --n_cross_attention=${NLAYERS}\
+    --max_seq_length=${MAX_SEQ_LENGTH}\
+    --output_dir=./results_summit_sparse_${SPARSE}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}\
+    --num_train_epochs=45\
+    --per_device_train_batch_size=${BATCH_SIZE}\
+    --per_device_eval_batch_size=${BATCH_SIZE}\
+    --learning_rate=${LR}\
+    --weight_decay=0.01\
+    --warmup_steps=5\
+    --logging_dir=./logs_summit_sparse_${SPARSE}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}\
+    --logging_steps=1\
+    --evaluation_strategy="epoch"\
+    --gradient_accumulation_steps=1\
+    --fp16=True\
+    --run_name="seq_smiles_affinity"\
+    --save_strategy="epoch"\
+    --seed=$((42+${ENSEMBLE_ID})) &
 done
 
 wait

@@ -29,7 +29,8 @@ class BertSparseSelfAttention(nn.Module):
 
         self.is_decoder = config.is_decoder
         self.sparse_self_attention = SparseSelfAttention(sparsity_config,
-            key_padding_mask_mode='add', # we're padding cross attention keys with -inf..0
+            attn_mask_mode='add',
+            key_padding_mask_mode='add',
             max_seq_length=max_seq_length)
 
     def transpose_for_scores(self, x):
@@ -60,15 +61,17 @@ class BertSparseSelfAttention(nn.Module):
         # such that the encoder's padding tokens are not attended to.
         is_cross_attention = encoder_hidden_states is not None
 
+        cross_attention_mask = None
+
         if is_cross_attention and past_key_value is not None:
             # reuse k,v, cross_attentions
             key_layer = past_key_value[0]
             value_layer = past_key_value[1]
-            attention_mask = encoder_attention_mask
+            cross_attention_mask = encoder_attention_mask
         elif is_cross_attention:
             key_layer = self.transpose_key_for_scores(self.key(encoder_hidden_states))
             value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
-            attention_mask = encoder_attention_mask
+            cross_attention_mask = encoder_attention_mask
         elif past_key_value is not None:
             key_layer = self.transpose_key_for_scores(self.key(hidden_states))
             value_layer = self.transpose_for_scores(self.value(hidden_states))
@@ -90,10 +93,15 @@ class BertSparseSelfAttention(nn.Module):
             # if encoder bi-directional self-attention `past_key_value` is always `None`
             past_key_value = (key_layer, value_layer)
 
+        self_attention_mask = None
+        if cross_attention_mask is None:
+            self_attention_mask = attention_mask
+
         context_layer = self.sparse_self_attention(query_layer,
                                                    key_layer,
                                                    value_layer,
-                                                   key_padding_mask=attention_mask)
+                                                   key_padding_mask=self_attention_mask,
+                                                   attn_mask=cross_attention_mask)
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #BSUB -P STF006
-#BSUB -W 2:00
+#BSUB -W 12:00
 #BSUB -q batch
-#BSUB -nnodes 512
+#BSUB -nnodes 1200
 #BSUB -J finetune_ensemble_regex
 #BSUB -o finetune_ensemble_regex.o%J
 #BSUB -e finetune_ensemble_regex.e%J
@@ -30,7 +30,7 @@ export TOKENIZERS_PARALLELISM=false
 rm -f `find -name *lock`
 
 # hyperparameters
-export NLAYERS=10
+export NLAYERS=6
 export LR=1e-4
 export DATASET=no_kras
 export MAX_SEQ_LENGTH=2048
@@ -38,8 +38,8 @@ export BATCH_SIZE=1
 export SPARSE=True
 
 for ENSEMBLE_ID in `seq 1 1`; do
-    jsrun -n 512 -g 6 -a 6 -c 42 python ../affinity_pred/finetune.py \
-    --deepspeed='ds_config_stage2.json'\
+    jsrun -n 1200 -g 6 -a 6 -c 42 python ../affinity_pred/finetune.py \
+    --deepspeed='ds_config_rocm.json'\
     --model_type='regex' \
     --dataset='/gpfs/alpine/world-shared/bip214/binding_affinity'\
     --split=${DATASET}\

@@ -142,8 +142,11 @@ class EnsembleSequenceRegressor(torch.nn.Module):
 
                 layer.attention.self = deepspeed_sparse_self_attn
 
-            self.pad_token_id = seq_config.pad_token_id if hasattr(
+            self.pad_token_id_seq = seq_config.pad_token_id if hasattr(
                 seq_config, 'pad_token_id') and seq_config.pad_token_id is not None else 0
+
+            self.pad_token_id_smiles = smiles_config.pad_token_id if hasattr(
+                smiles_config, 'pad_token_id') and smiles_config.pad_token_id is not None else 0
 
         # Cross-attention layers
         self.n_cross_attention_layers = n_cross_attention_layers
@@ -214,7 +217,7 @@ class EnsembleSequenceRegressor(torch.nn.Module):
                 block_size=self.sparsity_config.block,
                 input_ids=input_ids_1,
                 attention_mask=attention_mask_1,
-                pad_token_id=self.pad_token_id)
+                pad_token_id=self.pad_token_id_seq)
 
         input_shape = input_ids_1.size()
         device = input_ids_1.device
@@ -241,41 +244,69 @@ class EnsembleSequenceRegressor(torch.nn.Module):
                                          return_dict=False)
         smiles_output = encoder_outputs[0]
 
-        # cross-attention masks
-        cross_attention_mask_1 = self.seq_model.invert_attention_mask(attention_mask_1)
-
+        # 2D cross-attention masks
         padded_attention_mask_2 = attention_mask_2
         if self.sparsity_config is not None:
-            # pad smiles to seq len to make the cross attention matrix square
+            # pad smiles to seq len to make the cross attention mask square
             assert attention_mask_2.size()[1] < attention_mask_1.size()[1]
             pad_len = attention_mask_1.size()[1]-attention_mask_2.size()[1]
-            padded_attention_mask_2 = F.pad(attention_mask, [0, pad_len], value=0)
+            padded_attention_mask_2 = F.pad(padded_attention_mask_2, [0, pad_len], value=0)
 
-        cross_attention_mask_2 = self.smiles_model.invert_attention_mask(padded_attention_mask_2)
+        # this goes to the dense cross attention layer in any case, so doesn't require padding
+        cross_attention_mask_1 = attention_mask_1[:,None,:]*attention_mask_2[:,:,None]
+
+        # convert values to -inf..0
+        inv_cross_attention_mask_1 = self.smiles_model.invert_attention_mask(
+            cross_attention_mask_1
+        )
+
+        cross_attention_mask_2 = padded_attention_mask_2[:,None,:]*attention_mask_1[:,:,None]
+        inv_cross_attention_mask_2 = self.seq_model.invert_attention_mask(
+            cross_attention_mask_2
+        )
 
         hidden_seq = sequence_output
         hidden_smiles = smiles_output
 
+        if self.sparsity_config is not None:
+            # pad the hidden layers with the pad token to make the cross-attention matrix square
+            pad_len = hidden_seq.size()[1]-hidden_smiles.size()[1]
+            batch_size = hidden_smiles.shape[0]
+            pad_input_ids = hidden_smiles.new_full(
+                (batch_size, pad_len),
+                self.pad_token_id_smiles,
+                dtype=torch.long)
+            pad_token_type_ids = hidden_smiles.new_full(
+                (batch_size, pad_len),
+                0, # token type 0
+                dtype=torch.long)
+            position_ids = self.smiles_model.embeddings.position_ids
+            assert position_ids.shape[1] <= pad_len
+            pad_len_position_ids = pad_len - position_ids.shape[1]
+            position_ids = F.pad(position_ids, (0, pad_len_position_ids), value=self.pad_token_id_smiles)
+            pad_inputs_embeds = self.smiles_model.embeddings(
+                input_ids=pad_input_ids,
+                token_type_ids=pad_token_type_ids,
+                position_ids=position_ids,
+            )
+
         for i in range(self.n_cross_attention_layers):
             padded_smiles = hidden_smiles
             if self.sparsity_config is not None:
-                # pad the hidden layers to make the cross-attention matrix square
-                # not sure if we need to get an embedding of the pad token first?
-                pad_len = attention_mask_1.size()[1]-padded_smiles.size()[1]
-                padded_smiles = F.pad(padded_smiles, [0, 0, 0, pad_len], value=0)
+                padded_smiles = torch.cat([padded_smiles, pad_inputs_embeds], dim=-2)
 
             attention_output_1 = self.cross_attention_seq[i](
                 hidden_states=hidden_seq,
                 attention_mask=attention_mask_1,
                 encoder_hidden_states=padded_smiles,
-                encoder_attention_mask=cross_attention_mask_2,
+                encoder_attention_mask=inv_cross_attention_mask_2,
                 output_attentions=output_attentions)
 
             attention_output_2 = self.cross_attention_smiles[i](
                 hidden_states=hidden_smiles,
                 attention_mask=attention_mask_2,
                 encoder_hidden_states=hidden_seq,
-                encoder_attention_mask=cross_attention_mask_1,
+                encoder_attention_mask=inv_cross_attention_mask_1,
                 output_attentions=output_attentions)
 
             hidden_seq = attention_output_1[0]

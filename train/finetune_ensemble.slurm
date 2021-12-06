@@ -20,25 +20,29 @@ export TORCH_EXTENSIONS_DIR=/gpfs/alpine/world-shared/bip214/affinity_pred/train
 export OMP_NUM_THREADS=32
 export PYTHONUNBUFFERED=1
 
-# clear stale lock files
-rm -f `find -name *lock`
-
 export ENSEMBLE_ID=$SLURM_ARRAY_TASK_ID
 
+NLAYERS=10
+LR=1e-4
+DATASET=no_kras
+MAX_SEQ_LENGTH=2048
+BATCH_SIZE=1
+
 srun python ../affinity_pred/finetune.py \
-    --deepspeed='ds_config_rocm.json'\
+    --deepspeed='ds_config_stage2.json'\
     --model_type='regex' \
     --dataset='/gpfs/alpine/world-shared/bip214/binding_affinity'\
-    --split='no_kras'\
-    --n_cross_attention=10\
-    --output_dir=./results_regex_10cross_nokras_lr2.5e-4_spock_${ENSEMBLE_ID}\
+    --split=${DATASET}\
+    --n_cross_attention=${NLAYERS}\
+    --max_seq_length=${MAX_SEQ_LENGTH}\
+    --output_dir=./results_spock_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}\
     --num_train_epochs=45\
-    --per_device_train_batch_size=16\
-    --per_device_eval_batch_size=16\
-    --learning_rate=2.5e-4\
+    --per_device_train_batch_size=${BATCH_SIZE}\
+    --per_device_eval_batch_size=${BATCH_SIZE}\
+    --learning_rate=${LR}\
     --weight_decay=0.01\
     --warmup_steps=5\
-    --logging_dir=./logs_regex_10cross_nokras_lr2.5e-4_spock_${ENSEMBLE_ID}\
+    --logging_dir=./logs_spock_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}\
     --logging_steps=1\
     --evaluation_strategy="epoch"\
     --gradient_accumulation_steps=1\

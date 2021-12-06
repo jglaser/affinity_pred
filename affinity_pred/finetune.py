@@ -130,10 +130,6 @@ class ModelArguments:
         default=512
     )
 
-    sparse_attention: bool = field(
-        default=False
-    )
-
 @dataclass
 class DataArguments:
     dataset: str = field(
@@ -272,7 +268,6 @@ def main():
             return optimizer
 
     model = EnsembleSequenceRegressor(seq_model_name, smiles_model_directory,  max_seq_length=max_seq_length,
-                                     sparse_attention=model_args.sparse_attention,
                                      n_cross_attention_layers=model_args.n_cross_attention)
 
     trainer = MyTrainer(

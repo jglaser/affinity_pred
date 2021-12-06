@@ -48,7 +48,7 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DD
 
-from model import EnsembleSequenceRegressor
+from ensemble_embedding import ProteinLigandAffinity
 
 logger = logging.getLogger(__name__)
 
@@ -268,7 +268,7 @@ def main():
             )
             return optimizer
 
-    model = EnsembleSequenceRegressor(model_args.seq_model_name, smiles_model_directory,  max_seq_length=max_seq_length,
+    model = ProteinLigandAffinity(model_args.seq_model_name, smiles_model_directory,  max_seq_length=max_seq_length,
                                      n_cross_attention_layers=model_args.n_cross_attention)
 
     trainer = MyTrainer(

@@ -131,7 +131,7 @@ class CrossAttentionLayer(nn.Module):
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
-class EnsembleSequenceRegressor(torch.nn.Module):
+class EnsembleEmbedding(torch.nn.Module):
     def __init__(self, seq_model_name, smiles_model_name, max_seq_length,
                  n_cross_attention_layers=3):
         super().__init__()
@@ -144,6 +144,8 @@ class EnsembleSequenceRegressor(torch.nn.Module):
         smiles_config = BertConfig.from_pretrained(smiles_model_name)
         smiles_config.gradient_checkpointing=True
         self.smiles_model = BertModel.from_pretrained(smiles_model_name,config=smiles_config)
+
+        self.aggregate_hidden_size = seq_config.hidden_size+smiles_config.hidden_size
 
         self.max_seq_length = max_seq_length
 
@@ -188,12 +190,6 @@ class EnsembleSequenceRegressor(torch.nn.Module):
                 other_config=seq_config,
                 use_hierarchical_attention=False) for _ in range(n_cross_attention_layers)])
 
-        if is_deepspeed_zero3_enabled():
-            with deepspeed.zero.Init(config=deepspeed_config()):
-                self.linear = torch.nn.Linear(seq_config.hidden_size+smiles_config.hidden_size, 1)
-        else:
-            self.linear = torch.nn.Linear(seq_config.hidden_size+smiles_config.hidden_size, 1)
-
     def forward(
             self,
             input_ids=None,
@@ -202,7 +198,6 @@ class EnsembleSequenceRegressor(torch.nn.Module):
             position_ids=None,
             head_mask=None,
             inputs_embeds=None,
-            labels=None,
             output_attentions=False,
     ):
         outputs = []
@@ -290,14 +285,52 @@ class EnsembleSequenceRegressor(torch.nn.Module):
             attentions_seq = attention_output_1[1]
             attentions_smiles = attention_output_2[1]
 
-        logits = self.linear(last_hidden_states).squeeze(-1)
+        return last_hidden_states
+
+class ProteinLigandAffinity(torch.nn.Module):
+    def __init__(self, seq_model_name, smiles_model_name, max_seq_length,
+                 n_cross_attention_layers):
+        super().__init__()
+
+        self.embedding = EnsembleEmbedding(seq_model_name,
+            smiles_model_name,
+            max_seq_length,
+            n_cross_attention_layers
+        )
+
+        if is_deepspeed_zero3_enabled():
+            import deepspeed
+            with deepspeed.zero.Init(config=deepspeed_config()):
+                self.linear = torch.nn.Linear(self.embedding.aggregate_hidden_size, 1)
+        else:
+            self.linear = torch.nn.Linear(self.embedding.aggregate_hidden_size, 1)
+
+    def forward(
+            self,
+            input_ids=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            inputs_embeds=None,
+            labels=None,
+            output_attentions=False,
+    ):
+        embedding = self.embedding(
+            input_ids,
+            attention_mask,
+            token_type_ids,
+            position_ids,
+            head_mask,
+            inputs_embeds,
+            output_attentions
+        )
+
+        logits = self.linear(embedding)
 
         if labels is not None:
             loss_fct = torch.nn.MSELoss()
             loss = loss_fct(logits.view(-1, 1), labels.view(-1,1).half())
             return (loss, logits)
         else:
-            if output_attentions:
-                return logits, (attentions_seq, attentions_smiles)
-            else:
-                return logits
+            return logits

@@ -70,15 +70,6 @@ def handle_metrics(split, metrics, output_dir):
         logger.info(f"  {key} = {metrics[key]}")
     save_json(metrics, os.path.join(output_dir, f"{split}_results.json"))
 
-seq_model_name = "Rostlab/prot_bert_bfd" # for fine-tuning
-
-# this logic is necessary because online-downloading and caching doesn't seem to work
-if os.path.exists('seq_tokenizer'):
-    seq_tokenizer = BertTokenizer.from_pretrained('seq_tokenizer/', do_lower_case=False)
-else:
-    seq_tokenizer = BertTokenizer.from_pretrained(seq_model_name, do_lower_case=False)
-    seq_tokenizer.save_pretrained('seq_tokenizer/')
-
 def expand_seqs(seqs):
     input_fixed = ["".join(seq.split()) for seq in seqs]
     input_fixed = [re.sub(r"[UZOB]", "X", seq) for seq in input_fixed]
@@ -120,6 +111,18 @@ class ModelArguments:
     model_type: str = field(
         default='bert',
         metadata = {'choices': ['bert','regex']},
+    )
+
+    seq_model_name: str = field(
+        default=None
+    )
+
+    smiles_model_dir: str = field(
+        default=None
+    )
+
+    smiles_tokenizer_dir: str = field(
+        default=None
     )
 
     n_cross_attention: int = field(
@@ -169,16 +172,8 @@ def main():
 
     (training_args, model_args, data_args) = parser.parse_args_into_dataclasses()
 
-    # set up tokenizer and pre-trained model
-    model_base_directory_dict = {
-        "bert": ["/gpfs/alpine/world-shared/med106/blnchrd/models/bert_large_plus_clean/",
-                "/gpfs/alpine/world-shared/med106/gounley1/automatedmutations/pretraining/run/job_ikFsbI/output/"],
-        "regex": ["/gpfs/alpine/world-shared/med106/blnchrd/models/bert_large_plus_clean_regex/",
-                  "/gpfs/alpine/world-shared/med106/blnchrd/automatedmutations/pretraining/run/job_86neeM/output/"]
-    }
-
-    smiles_tokenizer_directory = model_base_directory_dict[model_args.model_type][0] + 'tokenizer'
-    smiles_model_directory = model_base_directory_dict[model_args.model_type][1]
+    smiles_tokenizer_directory = model_args.smiles_tokenizer_dir
+    smiles_model_directory = model_args.smiles_model_dir
     tokenizer_config = json.load(open(smiles_tokenizer_directory+'/config.json','r'))
 
     smiles_tokenizer =  AutoTokenizer.from_pretrained(smiles_tokenizer_directory, **tokenizer_config)
@@ -188,13 +183,19 @@ def main():
 
     print('Tokenizer lower_case:', smiles_tokenizer.do_lower_case, flush=True)
 
+    # this logic is necessary because online-downloading and caching doesn't seem to work
+    if os.path.exists('seq_tokenizer'):
+        seq_tokenizer = BertTokenizer.from_pretrained('seq_tokenizer/', do_lower_case=False)
+    else:
+        seq_tokenizer = BertTokenizer.from_pretrained(model_args.seq_model_name, do_lower_case=False)
+        seq_tokenizer.save_pretrained('seq_tokenizer/')
+
     max_smiles_length = min(200,BertConfig.from_pretrained(smiles_model_directory).max_position_embeddings)
     max_seq_length = model_args.max_seq_length
 
     # seed the weight initialization
     torch.manual_seed(training_args.seed)
 
-    import os
     if os.path.exists(data_args.dataset):
         # manually initialize dataset without downloading
         builder = datasets.load_dataset_builder(path=data_args.dataset)
@@ -267,7 +268,7 @@ def main():
             )
             return optimizer
 
-    model = EnsembleSequenceRegressor(seq_model_name, smiles_model_directory,  max_seq_length=max_seq_length,
+    model = EnsembleSequenceRegressor(model_args.seq_model_name, smiles_model_directory,  max_seq_length=max_seq_length,
                                      n_cross_attention_layers=model_args.n_cross_attention)
 
     trainer = MyTrainer(

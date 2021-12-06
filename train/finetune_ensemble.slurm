@@ -25,7 +25,7 @@ export ENSEMBLE_ID=$SLURM_ARRAY_TASK_ID
 NLAYERS=10
 LR=1e-4
 DATASET=no_kras
-MAX_SEQ_LENGTH=2048
+MAX_SEQ_LENGTH=4096
 BATCH_SIZE=1
 
 srun python ../affinity_pred/finetune.py \

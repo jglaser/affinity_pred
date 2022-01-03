@@ -203,6 +203,7 @@ class EnsembleEmbedding(torch.nn.Module):
         outputs = []
         input_ids_1 = input_ids[:,:self.max_seq_length]
         attention_mask_1 = attention_mask[:,:self.max_seq_length]
+        inv_attention_mask_1 = self.seq_model.invert_attention_mask(attention_mask_1)
 
         input_shape = input_ids_1.size()
         device = input_ids_1.device
@@ -222,6 +223,7 @@ class EnsembleEmbedding(torch.nn.Module):
         input_ids_2 = input_ids[:,self.max_seq_length:]
         input_shape = input_ids_2.size()
         attention_mask_2 = attention_mask[:,self.max_seq_length:]
+        inv_attention_mask_2 = self.smiles_model.invert_attention_mask(attention_mask_2)
 
         encoder_outputs = self.smiles_model(input_ids=input_ids_2,
                                          attention_mask=attention_mask_2,
@@ -274,9 +276,9 @@ class EnsembleEmbedding(torch.nn.Module):
 
             attention_output_2 = self.cross_attention_smiles[i](
                 hidden_states=hidden_smiles,
-                attention_mask=attention_mask_2,
+                attention_mask=inv_attention_mask_2,
                 encoder_hidden_states=hidden_seq,
-                encoder_attention_mask=attention_mask_1,
+                encoder_attention_mask=inv_attention_mask_1,
                 output_attentions=output_attentions)
 
             hidden_seq = attention_output_1[0]

@@ -181,14 +181,14 @@ class EnsembleEmbedding(torch.nn.Module):
                     use_hierarchical_attention=True) for _ in range(n_cross_attention_layers)])
                 self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(config=smiles_config,
                     other_config=seq_config,
-                    use_hierarchical_attention=True) for _ in range(n_cross_attention_layers)])
+                    use_hierarchical_attention=False) for _ in range(n_cross_attention_layers)])
         else:
             self.cross_attention_seq = nn.ModuleList([CrossAttentionLayer(config=seq_config,
                 other_config=smiles_config,
                 use_hierarchical_attention=True) for _ in range(n_cross_attention_layers)])
             self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(config=smiles_config,
                 other_config=seq_config,
-                use_hierarchical_attention=True) for _ in range(n_cross_attention_layers)])
+                use_hierarchical_attention=False) for _ in range(n_cross_attention_layers)])
 
     def forward(
             self,

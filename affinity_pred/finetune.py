@@ -133,6 +133,10 @@ class ModelArguments:
         default=512
     )
 
+    hierarchical_attention: bool = field(
+        default=False
+    )
+
 @dataclass
 class DataArguments:
     dataset: str = field(
@@ -268,8 +272,13 @@ def main():
             )
             return optimizer
 
-    model = ProteinLigandAffinity(model_args.seq_model_name, smiles_model_directory,  max_seq_length=max_seq_length,
-                                     n_cross_attention_layers=model_args.n_cross_attention)
+    model = ProteinLigandAffinity(
+        model_args.seq_model_name,
+        smiles_model_directory,
+        max_seq_length=max_seq_length,
+        n_cross_attention_layers=model_args.n_cross_attention,
+        use_hierarchical_attention=model_args.hierarchical_attention
+    )
 
     trainer = MyTrainer(
         model=model,

@@ -93,11 +93,15 @@ class BertHAttention1D(nn.Module):
         return outputs
 
 class CrossAttentionLayer(nn.Module):
-    def __init__(self,
+    def __init__(
+            self,
             config,
             other_config,
             use_hierarchical_attention=False,
-            mask_mode='mul'):
+            mask_mode='mul',
+            inv_fn=None,
+            inv_fn_encoder=None,
+        ):
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
@@ -108,9 +112,11 @@ class CrossAttentionLayer(nn.Module):
             self.crossattention.self = BertHAttention1D(
                 config=config,
                 mask_mode=mask_mode)
-        else:
-            if mask_mode != 'add':
-                raise NotImplementedError
+
+        self.inv_fn = inv_fn
+        self.inv_fn_encoder = inv_fn_encoder
+        self.mask_mode = mask_mode
+        self.use_hierarchical_attention = use_hierarchical_attention
 
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
@@ -128,6 +134,22 @@ class CrossAttentionLayer(nn.Module):
         past_key_value=None,
         output_attentions=False,
     ):
+
+        if self.mask_mode == 'mul' and not self.use_hierarchical_attention:
+            if attention_mask is not None:
+                if self.inv_fn is None:
+                    raise ValueError("Need inversion function multiplicative -> additive for attention mask")
+
+                # invert attention mask
+                attention_mask = self.inv_fn(attention_mask)
+
+            if encoder_attention_mask is not None:
+                if self.inv_fn_encoder is None:
+                    raise ValueError("Need encoder inversion function multiplicative -> additive for attention mask")
+
+                # invert attention mask
+                encoder_attention_mask = self.inv_fn_encoder(encoder_attention_mask)
+
         cross_attention_outputs = self.crossattention(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -154,8 +176,14 @@ class CrossAttentionLayer(nn.Module):
         return layer_output
 
 class EnsembleEmbedding(torch.nn.Module):
-    def __init__(self, seq_model_name, smiles_model_name, max_seq_length,
-                 n_cross_attention_layers=3):
+    def __init__(
+            self,
+            seq_model_name,
+            smiles_model_name,
+            max_seq_length,
+            n_cross_attention_layers=3,
+            use_hierarchical_attention=False
+        ):
         super().__init__()
 
         # enable gradient checkpointing
@@ -174,31 +202,34 @@ class EnsembleEmbedding(torch.nn.Module):
         # for deepspeed stage 3 (to estimate buffer sizes)
         self.config = BertConfig(hidden_size = self.seq_model.config.hidden_size + self.smiles_model.config.hidden_size)
 
-        # upgrade the self-attention layers to hierarchical ones
-        seq_layers = self.seq_model.encoder.layer
+        self.use_hierarchical_attention = use_hierarchical_attention
 
-        for layer in seq_layers:
-            h_attention = BertHAttention1D(
-                config=seq_config,
-                mask_mode='add'
-            )
-            h_attention.query = layer.attention.self.query
-            h_attention.key = layer.attention.self.key
-            h_attention.value = layer.attention.self.value
+        if self.use_hierarchical_attention:
+            # upgrade the self-attention layers to hierarchical ones
+            seq_layers = self.seq_model.encoder.layer
 
-            layer.attention.self = h_attention
+            for layer in seq_layers:
+                h_attention = BertHAttention1D(
+                    config=seq_config,
+                    mask_mode='add'
+                )
+                h_attention.query = layer.attention.self.query
+                h_attention.key = layer.attention.self.key
+                h_attention.value = layer.attention.self.value
 
-        smiles_layers = self.smiles_model.encoder.layer
-        for layer in smiles_layers:
-            h_attention = BertHAttention1D(
-                config=smiles_config,
-                mask_mode='add'
-            )
-            h_attention.query = layer.attention.self.query
-            h_attention.key = layer.attention.self.key
-            h_attention.value = layer.attention.self.value
+                layer.attention.self = h_attention
 
-            layer.attention.self = h_attention
+            smiles_layers = self.smiles_model.encoder.layer
+            for layer in smiles_layers:
+                h_attention = BertHAttention1D(
+                    config=smiles_config,
+                    mask_mode='add'
+                )
+                h_attention.query = layer.attention.self.query
+                h_attention.key = layer.attention.self.key
+                h_attention.value = layer.attention.self.value
+
+                layer.attention.self = h_attention
 
         self.pad_token_id_seq = seq_config.pad_token_id if hasattr(
             seq_config, 'pad_token_id') and seq_config.pad_token_id is not None else 0
@@ -213,19 +244,35 @@ class EnsembleEmbedding(torch.nn.Module):
             import deepspeed
 
             with deepspeed.zero.Init(config=deepspeed_config()):
-                self.cross_attention_seq = nn.ModuleList([CrossAttentionLayer(config=seq_config,
-                    other_config=smiles_config,
-                    use_hierarchical_attention=True) for _ in range(n_cross_attention_layers)])
-                self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(config=smiles_config,
-                    other_config=seq_config,
-                    use_hierarchical_attention=True) for _ in range(n_cross_attention_layers)])
+                self.cross_attention_seq = nn.ModuleList([CrossAttentionLayer(
+                        config=seq_config,
+                        other_config=smiles_config,
+                        use_hierarchical_attention=self.use_hierarchical_attention,
+                        inv_fn=self.seq_model.invert_attention_mask,
+                        inv_fn_encoder=self.smiles_model.invert_attention_mask
+                    ) for _ in range(n_cross_attention_layers)])
+                self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(
+                        config=smiles_config,
+                        other_config=seq_config,
+                        use_hierarchical_attention=self.use_hierarchical_attention,
+                        inv_fn=self.smiles_model.invert_attention_mask,
+                        inv_fn_encoder=self.seq_model.invert_attention_mask,
+                    ) for _ in range(n_cross_attention_layers)])
         else:
-            self.cross_attention_seq = nn.ModuleList([CrossAttentionLayer(config=seq_config,
-                other_config=smiles_config,
-                use_hierarchical_attention=True) for _ in range(n_cross_attention_layers)])
-            self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(config=smiles_config,
-                other_config=seq_config,
-                use_hierarchical_attention=True) for _ in range(n_cross_attention_layers)])
+            self.cross_attention_seq = nn.ModuleList([CrossAttentionLayer(
+                    config=seq_config,
+                    other_config=smiles_config,
+                    use_hierarchical_attention=self.use_hierarchical_attention,
+                    inv_fn=self.seq_model.invert_attention_mask,
+                    inv_fn_encoder=self.smiles_model.invert_attention_mask
+                ) for _ in range(n_cross_attention_layers)])
+            self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(
+                    config=smiles_config,
+                    other_config=seq_config,
+                    use_hierarchical_attention=self.use_hierarchical_attention,
+                    inv_fn=self.smiles_model.invert_attention_mask,
+                    inv_fn_encoder=self.seq_model.invert_attention_mask,
+                ) for _ in range(n_cross_attention_layers)])
 
     def forward(
             self,
@@ -241,23 +288,15 @@ class EnsembleEmbedding(torch.nn.Module):
         input_ids_1 = input_ids[:,:self.max_seq_length]
         attention_mask_1 = attention_mask[:,:self.max_seq_length]
 
-        input_shape = input_ids_1.size()
-        device = input_ids_1.device
-
-        embedding_output = self.seq_model.embeddings(
-                    input_ids=input_ids_1
-                )
-
-        encoder_outputs = self.seq_model.encoder(
-            embedding_output,
-            attention_mask=attention_mask_1, # 0/1 with HAttention
+        encoder_outputs = self.seq_model(
+            input_ids=input_ids_1,
+            attention_mask=attention_mask_1,
             head_mask=head_mask
             )
         sequence_output = encoder_outputs[0]
 
         # smiles model with full attention
         input_ids_2 = input_ids[:,self.max_seq_length:]
-        input_shape = input_ids_2.size()
         attention_mask_2 = attention_mask[:,self.max_seq_length:]
 
         encoder_outputs = self.smiles_model(input_ids=input_ids_2,
@@ -332,14 +371,18 @@ class EnsembleEmbedding(torch.nn.Module):
         return last_hidden_states
 
 class ProteinLigandAffinity(torch.nn.Module):
-    def __init__(self, seq_model_name, smiles_model_name, max_seq_length,
-                 n_cross_attention_layers):
+    def __init__(self,
+            seq_model_name,
+            smiles_model_name,
+            max_seq_length,
+            **kwargs
+            ):
         super().__init__()
 
         self.embedding = EnsembleEmbedding(seq_model_name,
             smiles_model_name,
             max_seq_length,
-            n_cross_attention_layers
+            **kwargs
         )
 
         if is_deepspeed_zero3_enabled():

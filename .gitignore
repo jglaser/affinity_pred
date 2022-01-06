@@ -1,0 +1,4 @@
+seq_tokenizer/
+*.out
+*.e*
+*.o*

@@ -98,6 +98,7 @@ class CrossAttentionLayer(nn.Module):
             config,
             other_config,
             use_hierarchical_attention=False,
+            local_block_size=16,
             mask_mode='mul',
             inv_fn=None,
             inv_fn_encoder=None,
@@ -111,7 +112,9 @@ class CrossAttentionLayer(nn.Module):
         if use_hierarchical_attention:
             self.crossattention.self = BertHAttention1D(
                 config=config,
-                mask_mode=mask_mode)
+                mask_mode=mask_mode,
+                local_block_size=local_block_size,
+            )
 
         self.inv_fn = inv_fn
         self.inv_fn_encoder = inv_fn_encoder
@@ -182,7 +185,8 @@ class EnsembleEmbedding(torch.nn.Module):
             smiles_model_name,
             max_seq_length,
             n_cross_attention_layers=3,
-            use_hierarchical_attention=False
+            use_hierarchical_attention=False,
+            local_block_size=16,
         ):
         super().__init__()
 
@@ -211,7 +215,8 @@ class EnsembleEmbedding(torch.nn.Module):
             for layer in seq_layers:
                 h_attention = BertHAttention1D(
                     config=seq_config,
-                    mask_mode='add'
+                    mask_mode='add',
+                    local_block_size=local_block_size,
                 )
                 h_attention.query = layer.attention.self.query
                 h_attention.key = layer.attention.self.key
@@ -223,7 +228,8 @@ class EnsembleEmbedding(torch.nn.Module):
             for layer in smiles_layers:
                 h_attention = BertHAttention1D(
                     config=smiles_config,
-                    mask_mode='add'
+                    mask_mode='add',
+                    local_block_size=local_block_size,
                 )
                 h_attention.query = layer.attention.self.query
                 h_attention.key = layer.attention.self.key
@@ -248,13 +254,15 @@ class EnsembleEmbedding(torch.nn.Module):
                         config=seq_config,
                         other_config=smiles_config,
                         use_hierarchical_attention=self.use_hierarchical_attention,
+                        local_block_size=local_block_size,
                         inv_fn=self.seq_model.invert_attention_mask,
-                        inv_fn_encoder=self.smiles_model.invert_attention_mask
+                        inv_fn_encoder=self.smiles_model.invert_attention_mask,
                     ) for _ in range(n_cross_attention_layers)])
                 self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(
                         config=smiles_config,
                         other_config=seq_config,
                         use_hierarchical_attention=self.use_hierarchical_attention,
+                        local_block_size=local_block_size,
                         inv_fn=self.smiles_model.invert_attention_mask,
                         inv_fn_encoder=self.seq_model.invert_attention_mask,
                     ) for _ in range(n_cross_attention_layers)])
@@ -263,13 +271,15 @@ class EnsembleEmbedding(torch.nn.Module):
                     config=seq_config,
                     other_config=smiles_config,
                     use_hierarchical_attention=self.use_hierarchical_attention,
+                    local_block_size=local_block_size,
                     inv_fn=self.seq_model.invert_attention_mask,
-                    inv_fn_encoder=self.smiles_model.invert_attention_mask
+                    inv_fn_encoder=self.smiles_model.invert_attention_mask,
                 ) for _ in range(n_cross_attention_layers)])
             self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(
                     config=smiles_config,
                     other_config=seq_config,
                     use_hierarchical_attention=self.use_hierarchical_attention,
+                    local_block_size=local_block_size,
                     inv_fn=self.smiles_model.invert_attention_mask,
                     inv_fn_encoder=self.seq_model.invert_attention_mask,
                 ) for _ in range(n_cross_attention_layers)])

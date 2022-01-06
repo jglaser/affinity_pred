@@ -137,6 +137,10 @@ class ModelArguments:
         default=False
     )
 
+    local_block_size: int = field(
+        default=16
+    )
+
 @dataclass
 class DataArguments:
     dataset: str = field(
@@ -277,7 +281,8 @@ def main():
         smiles_model_directory,
         max_seq_length=max_seq_length,
         n_cross_attention_layers=model_args.n_cross_attention,
-        use_hierarchical_attention=model_args.hierarchical_attention
+        use_hierarchical_attention=model_args.hierarchical_attention,
+        local_block_size=model_args.local_block_size,
     )
 
     trainer = MyTrainer(

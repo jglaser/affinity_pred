@@ -1,14 +1,13 @@
 #!/bin/bash
 #SBATCH -A STF006
-#SBATCH -J finetune_regex
+#SBATCH -J finetune
 #SBATCH -o slurm-%j.out
 #SBATCH -t 2:00:00
 #SBATCH -p batch
-##SBATCH -N 150
-#SBATCH -N 1
+#SBATCH -N 160
 #SBATCH --array=1
 #SBATCH --ntasks-per-node=8
-#SBATCH -x crusher183
+#SBATCH -x crusher183,crusher134
 
 echo $SLURM_JOB_NODELIST
 
@@ -28,13 +27,20 @@ export PYTHONUNBUFFERED=1
 export ENSEMBLE_ID=$SLURM_ARRAY_TASK_ID
 
 NLAYERS=5
-LR=5e-4
+LR=5e-3
 DATASET=no_kras
 MAX_SEQ_LENGTH=2048
-HATTENTION=False
+HATTENTION=True
+HATTENTION_BLOCKSIZE=64
 PER_DEVICE_BATCH_SIZE=8
 CLUSTER=crusher
 BATCH_SIZE=$((${PER_DEVICE_BATCH_SIZE}*${SLURM_NTASKS}))
+
+if [ "$HATTENTION" = "True" ]; then
+    ID_STR=${CLUSTER}_hatt_${HATTENTION}_${HATTENTION_BLOCKSIZE}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}
+else
+    ID_STR=${CLUSTER}_hatt_${HATTENTION}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}
+fi
 
 MACHINEFILE="nodes.$SLURM_JOB_ID"
 #srun -l /bin/hostname | sort -n | awk '{print $2}' > $MACHINEFILE
@@ -53,15 +59,16 @@ srun -l python ../affinity_pred/finetune.py \
     --split=${DATASET}\
     --n_cross_attention=${NLAYERS}\
     --hierarchical_attention=${HATTENTION}\
+    --local_block_size=${HATTENTION_BLOCKSIZE}\
     --max_seq_length=${MAX_SEQ_LENGTH}\
-    --output_dir=./results_${CLUSTER}_hatt_${HATTENTION}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}\
+    --output_dir=./results_${ID_STR}\
     --num_train_epochs=45\
     --per_device_train_batch_size=${PER_DEVICE_BATCH_SIZE}\
     --per_device_eval_batch_size=${PER_DEVICE_BATCH_SIZE}\
     --learning_rate=${LR}\
     --weight_decay=0.01\
     --warmup_steps=5\
-    --logging_dir=./logs_${CLUSTER}_hatt_${HATTENTION}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}\
+    --logging_dir=./logs_${ID_STR}\
     --logging_steps=1\
     --evaluation_strategy="epoch"\
     --gradient_accumulation_steps=1\

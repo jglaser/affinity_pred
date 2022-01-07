@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-#BSUB -P STF006
+#BSUB -P BIF136
 #BSUB -W 12:00
 #BSUB -q batch
 #BSUB -nnodes 1200
-#BSUB -J finetune_ensemble_regex
-#BSUB -o finetune_ensemble_regex.o%J
-#BSUB -e finetune_ensemble_regex.e%J
+#BSUB -J finetune
+#BSUB -o finetune.o%J
+#BSUB -e finetune.e%J
+##BSUB -w "done(1736296)"
 
 module load cuda/11.0.3
 module load open-ce/1.2.0-py38-0
@@ -26,16 +27,30 @@ export OMP_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 
-# hyperparameters
-export NLAYERS=10
-export LR=5e-5
-export DATASET=no_kras
-export MAX_SEQ_LENGTH=4096
-export BATCH_SIZE=1
+export NENSEMBLE=1
+export NNODES=`echo $LSB_MCPU_HOSTS | awk '{for (j=3; j <= NF; j+=2) { print $j }}' | wc -l`
+export NNODES=$((${NNODES}/${NENSEMBLE}))
+export NWORKERS=$((${NNODES}*6))
 
-for ENSEMBLE_ID in `seq 1 1`; do
-    jsrun -n 1200 -g 6 -a 6 -c 42 python ../affinity_pred/finetune.py \
-    --deepspeed='ds_config_stage2.json'\
+export NLAYERS=4
+export LR=5e-3
+export DATASET=no_kras
+export MAX_SEQ_LENGTH=2048
+export HATTENTION=True
+export HATTENTION_BLOCKSIZE=64
+export PER_DEVICE_BATCH_SIZE=1
+export CLUSTER=summit
+export BATCH_SIZE=$((${PER_DEVICE_BATCH_SIZE}*${NWORKERS}))
+
+for ENSEMBLE_ID in `seq 1 ${NENSEMBLE}`; do
+    if [ "$HATTENTION" = "True" ]; then
+        export ID_STR=${CLUSTER}_hatt_${HATTENTION}_${HATTENTION_BLOCKSIZE}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}
+    else
+        export ID_STR=${CLUSTER}_hatt_${HATTENTION}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}
+    fi
+
+    jsrun -n ${NNODES} -g 6 -a 6 -c 42 python ../affinity_pred/finetune.py \
+    --deepspeed='ds_config_rocm.json'\
     --smiles_tokenizer_dir='/gpfs/alpine/world-shared/med106/blnchrd/models/bert_large_plus_clean_regex/tokenizer'\
     --smiles_model_dir='/gpfs/alpine/world-shared/med106/blnchrd/automatedmutations/pretraining/run/job_86neeM/output'\
     --model_type='regex' \
@@ -43,15 +58,17 @@ for ENSEMBLE_ID in `seq 1 1`; do
     --dataset='/gpfs/alpine/world-shared/bip214/binding_affinity'\
     --split=${DATASET}\
     --n_cross_attention=${NLAYERS}\
+    --hierarchical_attention=${HATTENTION}\
+    --local_block_size=${HATTENTION_BLOCKSIZE}\
     --max_seq_length=${MAX_SEQ_LENGTH}\
-    --output_dir=./results_summit_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}\
+    --output_dir=./results_${ID_STR}\
     --num_train_epochs=45\
-    --per_device_train_batch_size=${BATCH_SIZE}\
-    --per_device_eval_batch_size=${BATCH_SIZE}\
+    --per_device_train_batch_size=${PER_DEVICE_BATCH_SIZE}\
+    --per_device_eval_batch_size=${PER_DEVICE_BATCH_SIZE}\
     --learning_rate=${LR}\
     --weight_decay=0.01\
     --warmup_steps=5\
-    --logging_dir=./logs_summit_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}\
+    --logging_dir=./logs_${ID_STR}\
     --logging_steps=1\
     --evaluation_strategy="epoch"\
     --gradient_accumulation_steps=1\

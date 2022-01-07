@@ -334,14 +334,9 @@ class EnsembleEmbedding(torch.nn.Module):
             0, # token type 0
             dtype=torch.long)
         position_ids = self.smiles_model.embeddings.position_ids
-        if position_ids.shape[1] <= hidden_seq.size()[1]:
-            # replicate position_ids beyond the max embedding 
-            pad_len_position_ids = hidden_seq.size()[1] - position_ids.shape[1]
-            extend_multiples = max(1,  hidden_seq.size()[1] // position_ids.size()[1])
-            position_ids = position_ids.repeat(1,extend_multiples)
-
-        position_ids = position_ids[:,hidden_smiles.size()[1]:]
-
+        assert position_ids.shape[1] <= pad_len
+        pad_len_position_ids = pad_len - position_ids.shape[1]
+        position_ids = F.pad(position_ids, (0, pad_len_position_ids), value=self.pad_token_id_smiles)
         pad_inputs_embeds = self.smiles_model.embeddings(
             input_ids=pad_input_ids,
             token_type_ids=pad_token_type_ids,

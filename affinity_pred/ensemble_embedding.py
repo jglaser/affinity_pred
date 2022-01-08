@@ -64,8 +64,8 @@ class BertHAttention1D(nn.Module):
 
         query_layer = self.query(hidden_states)
 
-        qkv = torch.stack([query_layer, key_layer, value_layer], dim=2)
-        qkv = torch.flatten(qkv, start_dim=2)
+        if is_cross_attention:
+            attention_mask = encoder_attention_mask
 
         if attention_mask is not None:
             if self.mask_mode == 'add':
@@ -75,20 +75,36 @@ class BertHAttention1D(nn.Module):
                 attention_mask = attention_mask.squeeze(dim)
             attention_mask = attention_mask.type(torch.bool)
 
-        if encoder_attention_mask is not None:
-            if self.mask_mode == 'add':
-                # make boolean (multiplicative)
-                encoder_attention_mask = encoder_attention_mask >= 0
-            for dim in range(encoder_attention_mask.dim()-1,0,-1):
-                encoder_attention_mask = encoder_attention_mask.squeeze(dim)
-            encoder_attention_mask = encoder_attention_mask.type(torch.bool)
+        pad_len_1 = 0
+        pad_len_2 = 0
 
         if is_cross_attention:
-            attention_mask = encoder_attention_mask
+            pad_len_1 = max(0, encoder_hidden_states.size()[1]-hidden_states.size()[1])
+            pad_len_2 = max(0, hidden_states.size()[1]-encoder_hidden_states.size()[1])
+
+            if pad_len_1 > 0:
+                # pad query sequence with zeros, the value doesn't matter because we'll be
+                # truncating the output again
+                query_layer = F.pad(query_layer, pad=[0,0,0,pad_len_1], value=0.0)
+            elif pad_len_2 > 0:
+                # pad keys and values
+                key_layer = F.pad(key_layer, pad=[0,0,0,pad_len_2], value=0.0)
+                value_layer = F.pad(value_layer, pad=[0,0,0,pad_len_2], value=0.0)
+
+                # we must be careful to also pad the mask to make the extra attention
+                # matrix values vanish under the softmax
+                attention_mask = F.pad(attention_mask, pad=[0,pad_len_2], value=False)
+
+        qkv = torch.stack([query_layer, key_layer, value_layer], dim=2)
+        qkv = torch.flatten(qkv, start_dim=2)
 
         context_layer = self.attn(qkv,
             mask=attention_mask
         )
+
+        if pad_len_1 > 0:
+            # truncate queries
+            context_layer = context_layer[:,:hidden_states.size()[1]]
 
         outputs = (context_layer, )
 
@@ -319,52 +335,23 @@ class EnsembleEmbedding(torch.nn.Module):
         hidden_seq = sequence_output
         hidden_smiles = smiles_output
 
-        padded_attention_mask_2 = attention_mask_2
-        pad_len = attention_mask_1.size()[1]-attention_mask_2.size()[1]
-        assert pad_len >= 0
-        padded_attention_mask_2 = F.pad(padded_attention_mask_2, [0, pad_len], value=0)
-
-        # pad the hidden layers with the pad token to make the cross-attention matrix square
-        pad_len = hidden_seq.size()[1]-hidden_smiles.size()[1]
-        batch_size = hidden_smiles.shape[0]
-        pad_input_ids = hidden_smiles.new_full(
-            (batch_size, pad_len),
-            self.pad_token_id_smiles,
-            dtype=torch.long)
-        pad_token_type_ids = hidden_smiles.new_full(
-            (batch_size, pad_len),
-            0, # token type 0
-            dtype=torch.long)
-        position_ids = self.smiles_model.embeddings.position_ids
-        assert position_ids.shape[1] <= pad_len
-        pad_len_position_ids = pad_len - position_ids.shape[1]
-        position_ids = F.pad(position_ids, (0, pad_len_position_ids), value=self.pad_token_id_smiles)
-        pad_inputs_embeds = self.smiles_model.embeddings(
-            input_ids=pad_input_ids,
-            token_type_ids=pad_token_type_ids,
-            position_ids=position_ids,
-        )
-
         for i in range(self.n_cross_attention_layers):
-            padded_smiles = torch.cat([hidden_smiles, pad_inputs_embeds], dim=-2)
-
             attention_output_1 = self.cross_attention_seq[i](
                 hidden_states=hidden_seq,
                 attention_mask=attention_mask_1,
-                encoder_hidden_states=padded_smiles,
-                encoder_attention_mask=padded_attention_mask_2,
+                encoder_hidden_states=hidden_smiles,
+                encoder_attention_mask=attention_mask_2,
                 output_attentions=output_attentions)
 
             attention_output_2 = self.cross_attention_smiles[i](
-                hidden_states=padded_smiles,
-                attention_mask=padded_attention_mask_2,
+                hidden_states=hidden_smiles,
+                attention_mask=attention_mask_2,
                 encoder_hidden_states=hidden_seq,
                 encoder_attention_mask=attention_mask_1,
                 output_attentions=output_attentions)
 
             hidden_seq = attention_output_1[0]
-            padded_smiles = attention_output_2[0]
-            hidden_smiles = padded_smiles[:,:hidden_smiles.size()[1]]
+            hidden_smiles = attention_output_2[0]
 
         mean_seq = torch.mean(hidden_seq,axis=1)
         mean_smiles = torch.mean(hidden_smiles,axis=1)

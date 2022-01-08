@@ -345,9 +345,9 @@ class EnsembleEmbedding(torch.nn.Module):
             position_ids=position_ids,
         )
 
-        padded_smiles = torch.cat([hidden_smiles, pad_inputs_embeds], dim=-2)
-
         for i in range(self.n_cross_attention_layers):
+            padded_smiles = torch.cat([hidden_smiles, pad_inputs_embeds], dim=-2)
+
             attention_output_1 = self.cross_attention_seq[i](
                 hidden_states=hidden_seq,
                 attention_mask=attention_mask_1,
@@ -364,8 +364,7 @@ class EnsembleEmbedding(torch.nn.Module):
 
             hidden_seq = attention_output_1[0]
             padded_smiles = attention_output_2[0]
-
-        hidden_smiles = padded_smiles[:,:hidden_smiles.size()[1]]
+            hidden_smiles = padded_smiles[:,:hidden_smiles.size()[1]]
 
         mean_seq = torch.mean(hidden_seq,axis=1)
         mean_smiles = torch.mean(hidden_smiles,axis=1)

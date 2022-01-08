@@ -22,18 +22,22 @@ class BertHAttention1D(nn.Module):
         super().__init__()
 
         attention_head_size = config.hidden_size // config.num_attention_heads
-        self.attn = HAttention1D(
-            dim=config.hidden_size,
-            heads=config.num_attention_heads,
-            dim_head=attention_head_size,
-            block_size=local_block_size,
-        )
-
         self.all_head_size = config.num_attention_heads * attention_head_size
 
         self.query = nn.Linear(config.hidden_size, self.all_head_size)
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
+
+        dtype = self.query.weight.dtype
+        eps = 1e-4 if dtype == torch.float16 else 1e-9
+
+        self.attn = HAttention1D(
+            dim=config.hidden_size,
+            heads=config.num_attention_heads,
+            dim_head=attention_head_size,
+            block_size=local_block_size,
+            eps=eps,
+        )
 
         self.attn.to_qkv = torch.nn.Identity() # passthrough
         self.attn.to_out = torch.nn.Identity()

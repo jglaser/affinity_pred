@@ -4,7 +4,7 @@ from transformers.modeling_utils import apply_chunking_to_forward
 
 from transformers.deepspeed import deepspeed_config, is_deepspeed_zero3_enabled
 
-from h_transformer_1d import HAttention1D
+from h_transformer_1d.h_transformer_1d import HAttention1D
 
 import torch
 import torch.nn as nn
@@ -83,9 +83,11 @@ class BertHAttention1D(nn.Module):
                 encoder_attention_mask = encoder_attention_mask.squeeze(dim)
             encoder_attention_mask = encoder_attention_mask.type(torch.bool)
 
+        if is_cross_attention:
+            attention_mask = encoder_attention_mask
+
         context_layer = self.attn(qkv,
-            mask=attention_mask,
-            key_value_mask=encoder_attention_mask
+            mask=attention_mask
         )
 
         outputs = (context_layer, )

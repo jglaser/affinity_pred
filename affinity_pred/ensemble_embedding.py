@@ -323,21 +323,18 @@ class EnsembleEmbedding(torch.nn.Module):
         encoder_outputs = self.seq_model(
             input_ids=input_ids_1,
             attention_mask=attention_mask_1,
-            head_mask=head_mask
-            )
-        sequence_output = encoder_outputs[0]
+        )
+        hidden_seq = encoder_outputs.last_hidden_state
 
         # smiles model with full attention
         input_ids_2 = input_ids[:,self.max_seq_length:]
         attention_mask_2 = attention_mask[:,self.max_seq_length:]
 
-        encoder_outputs = self.smiles_model(input_ids=input_ids_2,
-                                         attention_mask=attention_mask_2,
-                                         return_dict=False)
-        smiles_output = encoder_outputs[0]
-
-        hidden_seq = sequence_output
-        hidden_smiles = smiles_output
+        encoder_outputs = self.smiles_model(
+            input_ids=input_ids_2,
+            attention_mask=attention_mask_2,
+        )
+        hidden_smiles = encoder_outputs.last_hidden_state
 
         for i in range(self.n_cross_attention_layers):
             attention_output_1 = self.cross_attention_seq[i](
@@ -345,14 +342,16 @@ class EnsembleEmbedding(torch.nn.Module):
                 attention_mask=attention_mask_1,
                 encoder_hidden_states=hidden_smiles,
                 encoder_attention_mask=attention_mask_2,
-                output_attentions=output_attentions)
+                output_attentions=output_attentions,
+            )
 
             attention_output_2 = self.cross_attention_smiles[i](
                 hidden_states=hidden_smiles,
                 attention_mask=attention_mask_2,
                 encoder_hidden_states=hidden_seq,
                 encoder_attention_mask=attention_mask_1,
-                output_attentions=output_attentions)
+                output_attentions=output_attentions,
+            )
 
             hidden_seq = attention_output_1[0]
             hidden_smiles = attention_output_2[0]
@@ -376,7 +375,8 @@ class ProteinLigandAffinity(torch.nn.Module):
             ):
         super().__init__()
 
-        self.embedding = EnsembleEmbedding(seq_model_name,
+        self.embedding = EnsembleEmbedding(
+            seq_model_name,
             smiles_model_name,
             max_seq_length,
             **kwargs

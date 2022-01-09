@@ -238,18 +238,22 @@ class EnsembleEmbedding(torch.nn.Module):
 
                 layer.attention.self = h_attention
 
-            smiles_layers = self.smiles_model.encoder.layer
-            for layer in smiles_layers:
-                h_attention = BertHAttention1D(
-                    config=smiles_config,
-                    mask_mode='add',
-                    local_block_size=local_block_size,
-                )
-                h_attention.query = layer.attention.self.query
-                h_attention.key = layer.attention.self.key
-                h_attention.value = layer.attention.self.value
+            # typically, SMILES strings have much less tokens than protein sequences
+            # and the attention matrix fits into memory. Therefore, we use the full
+            # attention
 
-                layer.attention.self = h_attention
+#            smiles_layers = self.smiles_model.encoder.layer
+#            for layer in smiles_layers:
+#                h_attention = BertHAttention1D(
+#                    config=smiles_config,
+#                    mask_mode='add',
+#                    local_block_size=local_block_size,
+#                )
+#                h_attention.query = layer.attention.self.query
+#                h_attention.key = layer.attention.self.key
+#                h_attention.value = layer.attention.self.value
+#
+#                layer.attention.self = h_attention
 
         # Cross-attention layers
         self.n_cross_attention_layers = n_cross_attention_layers

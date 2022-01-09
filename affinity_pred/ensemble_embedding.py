@@ -2,8 +2,6 @@ from transformers import BertModel, BertConfig
 from transformers.models.bert.modeling_bert import BertAttention, BertIntermediate, BertOutput
 from transformers.modeling_utils import apply_chunking_to_forward
 
-from h_transformer_1d.h_transformer_1d import HAttention1D
-
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -72,7 +70,7 @@ class BertHAttention1D(nn.Module):
         if attention_mask is not None:
             if self.mask_mode == 'add':
                 # make boolean (multiplicative)
-                attention_mask = attention_mask >= 0
+                attention_mask = (attention_mask >= 0)
             for dim in range(attention_mask.dim()-1,0,-1):
                 attention_mask = attention_mask.squeeze(dim)
             attention_mask = attention_mask.type(torch.bool)
@@ -112,12 +110,85 @@ class BertHAttention1D(nn.Module):
 
         return outputs
 
+# attention with O(N) memory footprint
+class BertLinearAttention(nn.Module):
+    def __init__(
+        self,
+        config,
+    ):
+        super().__init__()
+
+        from linear_mem_attention_pytorch.fast_attn import Attention
+
+        attention_head_size = config.hidden_size // config.num_attention_heads
+        self.all_head_size = config.num_attention_heads * attention_head_size
+
+        self.query = nn.Linear(config.hidden_size, self.all_head_size)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size)
+
+        self.attn = Attention(
+            dim=config.hidden_size,
+            heads=config.num_attention_heads,
+            dim_head=attention_head_size,
+            bias=False,
+        )
+
+        self.attn.to_q = torch.nn.Identity()
+        self.attn.to_kv = torch.nn.Identity()
+        self.attn.to_out = torch.nn.Identity()
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        head_mask=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        past_key_value=None,
+        output_attentions=False,
+    ):
+        is_cross_attention = encoder_hidden_states is not None
+
+        if is_cross_attention:
+            key_layer = self.key(encoder_hidden_states)
+            value_layer = self.value(encoder_hidden_states)
+        else:
+            key_layer = self.key(hidden_states)
+            value_layer = self.value(hidden_states)
+
+        query_layer = self.query(hidden_states)
+
+        if is_cross_attention:
+            attention_mask = encoder_attention_mask
+
+        if attention_mask is not None:
+            if attention_mask.dtype == torch.float16 or attention_mask.dtype == torch.float32:
+                attention_mask = (attention_mask >= 0)
+                for dim in range(attention_mask.dim()-1,0,-1):
+                    attention_mask = attention_mask.squeeze(dim)
+            attention_mask = attention_mask.type(torch.bool)
+
+        kv = torch.stack([key_layer, value_layer], dim=2)
+        kv = torch.flatten(kv, start_dim=2)
+
+        context_layer = self.attn(
+            x=query_layer,
+            context=kv,
+            mask=attention_mask,
+        )
+
+        outputs = (context_layer, )
+
+        return outputs
+
+
 class CrossAttentionLayer(nn.Module):
     def __init__(
             self,
             config,
             other_config,
-            use_hierarchical_attention=False,
+            attn_mode='bert',
             local_block_size=16,
             mask_mode='mul',
             inv_fn=None,
@@ -129,17 +200,24 @@ class CrossAttentionLayer(nn.Module):
 
         self.crossattention = BertAttention(config)
 
-        if use_hierarchical_attention:
+        if attn_mode not in ('bert','hierarchical','linear'):
+            raise ValueError
+
+        if attn_mode == 'hierarchical':
             self.crossattention.self = BertHAttention1D(
                 config=config,
                 mask_mode=mask_mode,
                 local_block_size=local_block_size,
             )
+        elif attn_mode == 'linear':
+            self.crossattention.self = BertLinearAttention(
+                config=config
+            )
 
         self.inv_fn = inv_fn
         self.inv_fn_encoder = inv_fn_encoder
         self.mask_mode = mask_mode
-        self.use_hierarchical_attention = use_hierarchical_attention
+        self.attn_mode = attn_mode
 
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
@@ -158,7 +236,7 @@ class CrossAttentionLayer(nn.Module):
         output_attentions=False,
     ):
 
-        if self.mask_mode == 'mul' and not self.use_hierarchical_attention:
+        if self.mask_mode == 'mul' and self.attn_mode=='bert':
             if attention_mask is not None:
                 if self.inv_fn is None:
                     raise ValueError("Need inversion function multiplicative -> additive for attention mask")
@@ -205,7 +283,7 @@ class EnsembleEmbedding(torch.nn.Module):
             smiles_model_name,
             max_seq_length,
             n_cross_attention_layers=3,
-            use_hierarchical_attention=False,
+            attn_mode='bert',
             local_block_size=16,
         ):
         super().__init__()
@@ -220,40 +298,48 @@ class EnsembleEmbedding(torch.nn.Module):
 
         self.max_seq_length = max_seq_length
 
-        self.use_hierarchical_attention = use_hierarchical_attention
+        self.attn_mode = attn_mode
 
-        if self.use_hierarchical_attention:
-            # upgrade the self-attention layers to hierarchical ones
+        if self.attn_mode != 'bert':
+            # swap the self-attention layers
             seq_layers = self.seq_model.encoder.layer
 
             for layer in seq_layers:
-                h_attention = BertHAttention1D(
-                    config=seq_config,
-                    mask_mode='add',
-                    local_block_size=local_block_size,
-                )
-                h_attention.query = layer.attention.self.query
-                h_attention.key = layer.attention.self.key
-                h_attention.value = layer.attention.self.value
+                if self.attn_mode == 'hierarchical':
+                    attention = BertHAttention1D(
+                        config=seq_config,
+                        mask_mode='add',
+                        local_block_size=local_block_size,
+                    )
+                elif self.attn_mode == 'linear':
+                    attention = BertLinearAttention(
+                        config=seq_config
+                    )
 
-                layer.attention.self = h_attention
+                attention.query = layer.attention.self.query
+                attention.key = layer.attention.self.key
+                attention.value = layer.attention.self.value
 
-            # typically, SMILES strings have much less tokens than protein sequences
-            # and the attention matrix fits into memory. Therefore, we use the full
-            # attention
+                layer.attention.self = attention
 
-#            smiles_layers = self.smiles_model.encoder.layer
-#            for layer in smiles_layers:
-#                h_attention = BertHAttention1D(
-#                    config=smiles_config,
-#                    mask_mode='add',
-#                    local_block_size=local_block_size,
-#                )
-#                h_attention.query = layer.attention.self.query
-#                h_attention.key = layer.attention.self.key
-#                h_attention.value = layer.attention.self.value
-#
-#                layer.attention.self = h_attention
+            smiles_layers = self.smiles_model.encoder.layer
+            for layer in smiles_layers:
+                if self.attn_mode == 'hierarchical':
+                    attention = BertHAttention1D(
+                        config=smiles_config,
+                        mask_mode='add',
+                        local_block_size=local_block_size,
+                    )
+                elif self.attn_mode == 'linear':
+                    attention = BertLinearAttention(
+                        config=smiles_config,
+                    )
+
+                attention.query = layer.attention.self.query
+                attention.key = layer.attention.self.key
+                attention.value = layer.attention.self.value
+
+                layer.attention.self = attention
 
         # Cross-attention layers
         self.n_cross_attention_layers = n_cross_attention_layers
@@ -261,7 +347,7 @@ class EnsembleEmbedding(torch.nn.Module):
         self.cross_attention_seq = nn.ModuleList([CrossAttentionLayer(
                 config=seq_config,
                 other_config=smiles_config,
-                use_hierarchical_attention=self.use_hierarchical_attention,
+                attn_mode=self.attn_mode,
                 local_block_size=local_block_size,
                 inv_fn=self.seq_model.invert_attention_mask,
                 inv_fn_encoder=self.smiles_model.invert_attention_mask,
@@ -269,7 +355,7 @@ class EnsembleEmbedding(torch.nn.Module):
         self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(
                 config=smiles_config,
                 other_config=seq_config,
-                use_hierarchical_attention=self.use_hierarchical_attention,
+                attn_mode=self.attn_mode,
                 local_block_size=local_block_size,
                 inv_fn=self.smiles_model.invert_attention_mask,
                 inv_fn_encoder=self.seq_model.invert_attention_mask,

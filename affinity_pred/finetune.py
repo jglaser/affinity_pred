@@ -133,12 +133,12 @@ class ModelArguments:
         default=512
     )
 
-    hierarchical_attention: bool = field(
-        default=False
+    attn_mode: str = field(
+        default='bert'
     )
 
     local_block_size: int = field(
-        default=16
+        default=512
     )
 
 @dataclass
@@ -281,7 +281,7 @@ def main():
         smiles_model_directory,
         max_seq_length=max_seq_length,
         n_cross_attention_layers=model_args.n_cross_attention,
-        use_hierarchical_attention=model_args.hierarchical_attention,
+        attn_mode=model_args.attn_mode,
         local_block_size=model_args.local_block_size,
     )
 

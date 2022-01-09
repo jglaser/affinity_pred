@@ -2,8 +2,6 @@ from transformers import BertModel, BertConfig
 from transformers.models.bert.modeling_bert import BertAttention, BertIntermediate, BertOutput
 from transformers.modeling_utils import apply_chunking_to_forward
 
-from transformers.deepspeed import deepspeed_config, is_deepspeed_zero3_enabled
-
 from h_transformer_1d.h_transformer_1d import HAttention1D
 
 import torch
@@ -212,21 +210,15 @@ class EnsembleEmbedding(torch.nn.Module):
         ):
         super().__init__()
 
-        # enable gradient checkpointing
-        seq_config = BertConfig.from_pretrained(seq_model_name)
-        seq_config.gradient_checkpointing=True
-        self.seq_model = BertModel.from_pretrained(seq_model_name,config=seq_config)
+        self.seq_model = BertModel.from_pretrained(seq_model_name)
+        self.smiles_model = BertModel.from_pretrained(smiles_model_name)
 
-        smiles_config = BertConfig.from_pretrained(smiles_model_name)
-        smiles_config.gradient_checkpointing=True
-        self.smiles_model = BertModel.from_pretrained(smiles_model_name,config=smiles_config)
+        seq_config = self.seq_model.config
+        smiles_config = self.smiles_model.config
 
         self.aggregate_hidden_size = seq_config.hidden_size+smiles_config.hidden_size
 
         self.max_seq_length = max_seq_length
-
-        # for deepspeed stage 3 (to estimate buffer sizes)
-        self.config = BertConfig(hidden_size = self.seq_model.config.hidden_size + self.smiles_model.config.hidden_size)
 
         self.use_hierarchical_attention = use_hierarchical_attention
 
@@ -259,52 +251,25 @@ class EnsembleEmbedding(torch.nn.Module):
 
                 layer.attention.self = h_attention
 
-        self.pad_token_id_seq = seq_config.pad_token_id if hasattr(
-            seq_config, 'pad_token_id') and seq_config.pad_token_id is not None else 0
-
-        self.pad_token_id_smiles = smiles_config.pad_token_id if hasattr(
-            smiles_config, 'pad_token_id') and smiles_config.pad_token_id is not None else 0
-
         # Cross-attention layers
         self.n_cross_attention_layers = n_cross_attention_layers
 
-        if is_deepspeed_zero3_enabled():
-            import deepspeed
-
-            with deepspeed.zero.Init(config=deepspeed_config()):
-                self.cross_attention_seq = nn.ModuleList([CrossAttentionLayer(
-                        config=seq_config,
-                        other_config=smiles_config,
-                        use_hierarchical_attention=self.use_hierarchical_attention,
-                        local_block_size=local_block_size,
-                        inv_fn=self.seq_model.invert_attention_mask,
-                        inv_fn_encoder=self.smiles_model.invert_attention_mask,
-                    ) for _ in range(n_cross_attention_layers)])
-                self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(
-                        config=smiles_config,
-                        other_config=seq_config,
-                        use_hierarchical_attention=self.use_hierarchical_attention,
-                        local_block_size=local_block_size,
-                        inv_fn=self.smiles_model.invert_attention_mask,
-                        inv_fn_encoder=self.seq_model.invert_attention_mask,
-                    ) for _ in range(n_cross_attention_layers)])
-        else:
-            self.cross_attention_seq = nn.ModuleList([CrossAttentionLayer(
-                    config=seq_config,
-                    other_config=smiles_config,
-                    use_hierarchical_attention=self.use_hierarchical_attention,
-                    local_block_size=local_block_size,
-                    inv_fn=self.seq_model.invert_attention_mask,
-                    inv_fn_encoder=self.smiles_model.invert_attention_mask,
-                ) for _ in range(n_cross_attention_layers)])
-            self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(
-                    config=smiles_config,
-                    other_config=seq_config,
-                    use_hierarchical_attention=self.use_hierarchical_attention,
-                    local_block_size=local_block_size,
-                    inv_fn=self.smiles_model.invert_attention_mask,
-                    inv_fn_encoder=self.seq_model.invert_attention_mask,
-                ) for _ in range(n_cross_attention_layers)])
+        self.cross_attention_seq = nn.ModuleList([CrossAttentionLayer(
+                config=seq_config,
+                other_config=smiles_config,
+                use_hierarchical_attention=self.use_hierarchical_attention,
+                local_block_size=local_block_size,
+                inv_fn=self.seq_model.invert_attention_mask,
+                inv_fn_encoder=self.smiles_model.invert_attention_mask,
+            ) for _ in range(n_cross_attention_layers)])
+        self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(
+                config=smiles_config,
+                other_config=seq_config,
+                use_hierarchical_attention=self.use_hierarchical_attention,
+                local_block_size=local_block_size,
+                inv_fn=self.smiles_model.invert_attention_mask,
+                inv_fn_encoder=self.seq_model.invert_attention_mask,
+            ) for _ in range(n_cross_attention_layers)])
 
     def forward(
             self,
@@ -317,6 +282,8 @@ class EnsembleEmbedding(torch.nn.Module):
             output_attentions=False,
     ):
         outputs = []
+
+        # encode amino acids
         input_ids_1 = input_ids[:,:self.max_seq_length]
         attention_mask_1 = attention_mask[:,:self.max_seq_length]
 
@@ -326,7 +293,7 @@ class EnsembleEmbedding(torch.nn.Module):
         )
         hidden_seq = encoder_outputs.last_hidden_state
 
-        # smiles model with full attention
+        # encode SMILES
         input_ids_2 = input_ids[:,self.max_seq_length:]
         attention_mask_2 = attention_mask[:,self.max_seq_length:]
 
@@ -382,12 +349,7 @@ class ProteinLigandAffinity(torch.nn.Module):
             **kwargs
         )
 
-        if is_deepspeed_zero3_enabled():
-            import deepspeed
-            with deepspeed.zero.Init(config=deepspeed_config()):
-                self.linear = torch.nn.Linear(self.embedding.aggregate_hidden_size, 1)
-        else:
-            self.linear = torch.nn.Linear(self.embedding.aggregate_hidden_size, 1)
+        self.linear = torch.nn.Linear(self.embedding.aggregate_hidden_size, 1)
 
     def forward(
             self,

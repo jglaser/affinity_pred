@@ -281,7 +281,6 @@ class EnsembleEmbedding(torch.nn.Module):
             self,
             seq_model_name,
             smiles_model_name,
-            max_seq_length,
             n_cross_attention_layers=3,
             attn_mode='bert',
             local_block_size=16,
@@ -295,8 +294,6 @@ class EnsembleEmbedding(torch.nn.Module):
         smiles_config = self.smiles_model.config
 
         self.aggregate_hidden_size = seq_config.hidden_size+smiles_config.hidden_size
-
-        self.max_seq_length = max_seq_length
 
         self.attn_mode = attn_mode
 
@@ -363,35 +360,33 @@ class EnsembleEmbedding(torch.nn.Module):
 
     def forward(
             self,
-            input_ids=None,
-            attention_mask=None,
-            token_type_ids=None,
-            position_ids=None,
-            head_mask=None,
-            inputs_embeds=None,
+            input_ids_1=None,
+            attention_mask_1=None,
+            input_ids_2=None,
+            attention_mask_2=None,
             output_attentions=False,
     ):
         outputs = []
 
-        # encode amino acids
-        input_ids_1 = input_ids[:,:self.max_seq_length]
-        attention_mask_1 = attention_mask[:,:self.max_seq_length]
+        if input_ids_1.dim() == 2:
+            input_ids_1 = input_ids_1[:, None, :]
+            if attention_mask_1 is not None:
+                attention_mask_1 = attention_mask_1[:, None, :]
 
-        position_ids_1 = None
-        if position_ids is not None:
-            position_ids_1 = position_ids[:,:self.max_seq_length]
+        # embed each chunk separately, then concatenate hidden states
+        hidden_states = list()
+        for i_chunk in range(input_ids_1.size()[1]):
+            # encode amino acids
+            encoder_outputs = self.seq_model(
+                input_ids=input_ids_1[:,i_chunk],
+                attention_mask=attention_mask_1[:,i_chunk],
+            )
+            hidden_states += [encoder_outputs.last_hidden_state]
 
-        encoder_outputs = self.seq_model(
-            input_ids=input_ids_1,
-            attention_mask=attention_mask_1,
-            position_ids=position_ids_1,
-        )
-        hidden_seq = encoder_outputs.last_hidden_state
+        hidden_seq = torch.cat(hidden_states,dim=1)
+        attention_mask_1 = torch.flatten(attention_mask_1,start_dim=1)
 
         # encode SMILES
-        input_ids_2 = input_ids[:,self.max_seq_length:]
-        attention_mask_2 = attention_mask[:,self.max_seq_length:]
-
         encoder_outputs = self.smiles_model(
             input_ids=input_ids_2,
             attention_mask=attention_mask_2,
@@ -401,7 +396,6 @@ class EnsembleEmbedding(torch.nn.Module):
         for i in range(self.n_cross_attention_layers):
             attention_output_1 = self.cross_attention_seq[i](
                 hidden_states=hidden_seq,
-                attention_mask=attention_mask_1,
                 encoder_hidden_states=hidden_smiles,
                 encoder_attention_mask=attention_mask_2,
                 output_attentions=output_attentions,
@@ -409,7 +403,6 @@ class EnsembleEmbedding(torch.nn.Module):
 
             attention_output_2 = self.cross_attention_smiles[i](
                 hidden_states=hidden_smiles,
-                attention_mask=attention_mask_2,
                 encoder_hidden_states=hidden_seq,
                 encoder_attention_mask=attention_mask_1,
                 output_attentions=output_attentions,
@@ -432,7 +425,6 @@ class ProteinLigandAffinity(torch.nn.Module):
     def __init__(self,
             seq_model_name,
             smiles_model_name,
-            max_seq_length,
             **kwargs
             ):
         super().__init__()
@@ -440,7 +432,6 @@ class ProteinLigandAffinity(torch.nn.Module):
         self.embedding = EnsembleEmbedding(
             seq_model_name,
             smiles_model_name,
-            max_seq_length,
             **kwargs
         )
 
@@ -448,23 +439,19 @@ class ProteinLigandAffinity(torch.nn.Module):
 
     def forward(
             self,
-            input_ids=None,
-            attention_mask=None,
-            token_type_ids=None,
-            position_ids=None,
-            head_mask=None,
-            inputs_embeds=None,
+            input_ids_1=None,
+            attention_mask_1=None,
+            input_ids_2=None,
+            attention_mask_2=None,
             labels=None,
             output_attentions=False,
     ):
         embedding = self.embedding(
-            input_ids,
-            attention_mask,
-            token_type_ids,
-            position_ids,
-            head_mask,
-            inputs_embeds,
-            output_attentions
+            input_ids_1=input_ids_1,
+            attention_mask_1=attention_mask_1,
+            input_ids_2=input_ids_2,
+            attention_mask_2=attention_mask_2,
+            output_attentions=output_attentions
         )
 
         logits = self.linear(embedding)

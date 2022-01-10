@@ -160,33 +160,51 @@ class DataArguments:
 def main():
     # on-the-fly tokenization
     def encode(item):
-        seq_encodings = seq_tokenizer(expand_seqs(item['seq'])[0],
-                                     is_split_into_words=True,
+        def chunks(lst, n, pad_len=None):
+            if pad_len is None:
+                pad_len = len(lst)
+            for i in range(0, pad_len, n):
+                yield lst[i:i + n]
+
+        # split the input sequence into chunks that can be forwarded to the pre-trained model
+        max_len = seq_chunk_size - 2 # account for [CLS] and [SEP]
+        pad_len = ((max_seq_length+seq_chunk_size-1)//seq_chunk_size)*max_len
+        seq_encodings = list()
+        for chunk in chunks(expand_seqs(item['seq'])[0],max_len,pad_len):
+            # circumvent a BertTokenizer issue with empty chunks
+            chunk_encoding = seq_tokenizer(chunk if len(chunk) > 0 else '',
+                                     is_split_into_words=(len(chunk) > 0),
                                      return_offsets_mapping=False,
                                      truncation=True,
                                      padding='max_length',
                                      add_special_tokens=True,
-                                     max_length=max_seq_length)
+                                     max_length=seq_chunk_size)
+            seq_encodings += [chunk_encoding]
 
-        # cycle through position embeddings to extend sequence model to longer sentences
-        seq_position_ids = list(range(seq_chunk_size))
-        extend_multiples = max_seq_length//seq_chunk_size
-        seq_position_ids += seq_position_ids*extend_multiples
-        seq_position_ids = seq_position_ids[:max_seq_length]
+        item['input_ids_1'] = list()
+        item['attention_mask_1'] = list()
+        for encoding in seq_encodings:
+            item['input_ids_1'] += [encoding['input_ids']]
+            item['attention_mask_1'] += [encoding['attention_mask']]
+
+        item['input_ids_1'] = [torch.tensor(item['input_ids_1'])]
+        item['attention_mask_1'] = [torch.tensor(item['attention_mask_1'])]
 
         smiles_encodings = smiles_tokenizer(item['smiles_can'][0],
                                             padding='max_length',
-                                            max_length=max_smiles_length,
+                                            max_length=smiles_tokenizer.model_max_length,
                                             add_special_tokens=True,
                                             truncation=True)
 
-        item['input_ids'] = [torch.cat([torch.tensor(seq_encodings['input_ids']),
-                                        torch.tensor(smiles_encodings['input_ids'])])]
-        item['attention_mask'] = [torch.cat([torch.tensor(seq_encodings['attention_mask']),
-                                            torch.tensor(smiles_encodings['attention_mask'])])]
-        item['position_ids'] = [torch.tensor(seq_position_ids)]
+        item['input_ids_2'] = [torch.tensor(smiles_encodings['input_ids'])]
+        item['attention_mask_2'] = [torch.tensor(smiles_encodings['attention_mask'])]
 
         return item
+
+    if torch.distributed.is_mpi_available():
+        torch.distributed.init_process_group(backend='mpi')
+        if torch.distributed.get_rank() == 0:
+            print('Using MPI backend with torch.distributed')
 
     # also handles --deepspeed
     parser = HfArgumentParser([TrainingArguments,ModelArguments, DataArguments])
@@ -211,7 +229,6 @@ def main():
         seq_tokenizer = BertTokenizer.from_pretrained(model_args.seq_model_name, do_lower_case=False)
         seq_tokenizer.save_pretrained('seq_tokenizer/')
 
-    max_smiles_length = min(200,BertConfig.from_pretrained(smiles_model_directory).max_position_embeddings)
     max_seq_length = model_args.max_seq_length
     seq_chunk_size = model_args.seq_chunk_size
 
@@ -282,7 +299,6 @@ def main():
     model = ProteinLigandAffinity(
         model_args.seq_model_name,
         smiles_model_directory,
-        max_seq_length=max_seq_length,
         n_cross_attention_layers=model_args.n_cross_attention,
         attn_mode=model_args.attn_mode,
         local_block_size=model_args.local_block_size,

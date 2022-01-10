@@ -377,9 +377,14 @@ class EnsembleEmbedding(torch.nn.Module):
         input_ids_1 = input_ids[:,:self.max_seq_length]
         attention_mask_1 = attention_mask[:,:self.max_seq_length]
 
+        position_ids_1 = None
+        if position_ids is not None:
+            position_ids_1 = position_ids[:,:self.max_seq_length]
+
         encoder_outputs = self.seq_model(
             input_ids=input_ids_1,
             attention_mask=attention_mask_1,
+            position_ids=position_ids_1,
         )
         hidden_seq = encoder_outputs.last_hidden_state
 

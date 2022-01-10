@@ -133,6 +133,11 @@ class ModelArguments:
         default=512
     )
 
+    # the maximum sentence length the sequence model was trained on
+    seq_chunk_size: int = field(
+        default=512
+    )
+
     attn_mode: str = field(
         default='bert'
     )
@@ -163,6 +168,12 @@ def main():
                                      add_special_tokens=True,
                                      max_length=max_seq_length)
 
+        # cycle through position embeddings to extend sequence model to longer sentences
+        seq_position_ids = list(range(seq_chunk_size))
+        extend_multiples = max_seq_length//seq_chunk_size
+        seq_position_ids += seq_position_ids*extend_multiples
+        seq_position_ids = seq_position_ids[:max_seq_length]
+
         smiles_encodings = smiles_tokenizer(item['smiles_can'][0],
                                             padding='max_length',
                                             max_length=max_smiles_length,
@@ -173,6 +184,8 @@ def main():
                                         torch.tensor(smiles_encodings['input_ids'])])]
         item['attention_mask'] = [torch.cat([torch.tensor(seq_encodings['attention_mask']),
                                             torch.tensor(smiles_encodings['attention_mask'])])]
+        item['position_ids'] = [torch.tensor(seq_position_ids)]
+
         return item
 
     # also handles --deepspeed
@@ -200,6 +213,7 @@ def main():
 
     max_smiles_length = min(200,BertConfig.from_pretrained(smiles_model_directory).max_position_embeddings)
     max_seq_length = model_args.max_seq_length
+    seq_chunk_size = model_args.seq_chunk_size
 
     # seed the weight initialization
     torch.manual_seed(training_args.seed)
@@ -265,17 +279,6 @@ def main():
         transformers.utils.logging.set_verbosity_info()
     logger.info("Training/evaluation parameters %s", training_args)
 
-    class MyTrainer(Trainer):
-        def create_optimizer(self):
-            optimizer = optim.Lamb(
-                self.model.parameters(),
-                lr= 5e-4,
-                betas=(0.9, 0.999),
-                eps=1e-8,
-                weight_decay=0,
-            )
-            return optimizer
-
     model = ProteinLigandAffinity(
         model_args.seq_model_name,
         smiles_model_directory,
@@ -285,7 +288,7 @@ def main():
         local_block_size=model_args.local_block_size,
     )
 
-    trainer = MyTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,                   # training arguments, defined above
         train_dataset=train_dataset,          # training dataset

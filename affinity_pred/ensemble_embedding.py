@@ -458,7 +458,7 @@ class ProteinLigandAffinity(torch.nn.Module):
 
         if labels is not None:
             loss_fct = torch.nn.MSELoss()
-            loss = loss_fct(logits.view(-1, 1), labels.view(-1,1).half())
+            loss = loss_fct(logits.view(-1, 1), labels.view(-1,1).type(self.linear.weight.dtype))
             return (loss, logits)
         else:
             return logits

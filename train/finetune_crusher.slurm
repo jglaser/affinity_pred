@@ -4,10 +4,11 @@
 #SBATCH -o slurm-%j.out
 #SBATCH -t 2:00:00
 #SBATCH -p batch
-#SBATCH -N 160
+#SBATCH -N 24
 #SBATCH --array=1
 #SBATCH --ntasks-per-node=8
-#SBATCH -x crusher183,crusher134
+#SBATCH --gpus-per-task=1
+##SBATCH -d afterany:54274
 
 echo $SLURM_JOB_NODELIST
 
@@ -16,6 +17,9 @@ conda activate /gpfs/alpine/bip214/world-shared/crusher-env
 
 module load rocm/4.5.0
 module load gcc/11.2.0
+
+module load craype-accel-amd-gfx90a
+export MPICH_GPU_SUPPORT_ENABLED=1
 
 export HF_HOME=/gpfs/alpine/world-shared/bip214/affinity_pred/train
 export HF_DATASETS_CACHE=/gpfs/alpine/world-shared/bip214/affinity_pred/train/dataset-cache
@@ -26,31 +30,32 @@ export PYTHONUNBUFFERED=1
 
 export ENSEMBLE_ID=$SLURM_ARRAY_TASK_ID
 
-NLAYERS=5
-LR=5e-3
+NLAYERS=1
+#NLAYERS=5
+LR=3e-5
 DATASET=no_kras
-MAX_SEQ_LENGTH=2048
-HATTENTION=True
-HATTENTION_BLOCKSIZE=64
-PER_DEVICE_BATCH_SIZE=8
+MAX_SEQ_LENGTH=1024
+#MAX_SEQ_LENGTH=2048
+ATTN_MODE=linear
+#ATTN_MODE=bert
+HATTENTION_BLOCKSIZE=512
+#HATTENTION_BLOCKSIZE=2048
+PER_DEVICE_BATCH_SIZE=16
 CLUSTER=crusher
 BATCH_SIZE=$((${PER_DEVICE_BATCH_SIZE}*${SLURM_NTASKS}))
 
-if [ "$HATTENTION" = "True" ]; then
-    ID_STR=${CLUSTER}_hatt_${HATTENTION}_${HATTENTION_BLOCKSIZE}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}
+if [ "$ATTN_MODE" = "hierarchical" ]; then
+    ID_STR=${CLUSTER}_attn_${ATTN_MODE}_${HATTENTION_BLOCKSIZE}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}
 else
-    ID_STR=${CLUSTER}_hatt_${HATTENTION}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}
+    ID_STR=${CLUSTER}_attn_${ATTN_MODE}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}
 fi
 
-MACHINEFILE="nodes.$SLURM_JOB_ID"
-#srun -l /bin/hostname | sort -n | awk '{print $2}' > $MACHINEFILE
-srun -l /bin/hostname | sort -n > $MACHINEFILE
-cat $MACHINEFILE
+srun -l /bin/hostname | sort -n
 
 export LD_PRELOAD="/opt/cray/pe/gcc/11.2.0/snos/lib64/libstdc++.so.6 /gpfs/alpine/world-shared/bip214/rocm_smi_lib/build/rocm_smi/librocm_smi64.so"
+export LD_PRELOAD="${LD_PRELOAD} ${CRAY_MPICH_ROOTDIR}/gtl/lib/libmpi_gtl_hsa.so"
 
-srun -l python ../affinity_pred/finetune.py \
-    --deepspeed='ds_config_rocm.json'\
+srun python ../affinity_pred/finetune.py \
     --smiles_tokenizer_dir='/gpfs/alpine/world-shared/med106/blnchrd/models/bert_large_plus_clean_regex/tokenizer'\
     --smiles_model_dir='/gpfs/alpine/world-shared/med106/blnchrd/automatedmutations/pretraining/run/job_86neeM/output'\
     --model_type='regex' \
@@ -58,9 +63,10 @@ srun -l python ../affinity_pred/finetune.py \
     --dataset='/gpfs/alpine/world-shared/bip214/binding_affinity'\
     --split=${DATASET}\
     --n_cross_attention=${NLAYERS}\
-    --hierarchical_attention=${HATTENTION}\
+    --attn_mode=${ATTN_MODE}\
     --local_block_size=${HATTENTION_BLOCKSIZE}\
     --max_seq_length=${MAX_SEQ_LENGTH}\
+    --seq_chunk_size=512\
     --output_dir=./results_${ID_STR}\
     --num_train_epochs=45\
     --per_device_train_batch_size=${PER_DEVICE_BATCH_SIZE}\
@@ -70,9 +76,11 @@ srun -l python ../affinity_pred/finetune.py \
     --warmup_steps=5\
     --logging_dir=./logs_${ID_STR}\
     --logging_steps=1\
-    --evaluation_strategy="epoch"\
+    --evaluation_strategy="steps"\
+    --eval_steps=500\
     --gradient_accumulation_steps=1\
     --fp16=True\
     --run_name="seq_smiles_affinity"\
-    --save_strategy="epoch"\
+    --save_strategy="steps"\
+    --save_steps=500\
     --seed=$((42+${ENSEMBLE_ID}))

@@ -205,11 +205,17 @@ def main():
         torch.distributed.init_process_group(backend='mpi')
         if torch.distributed.get_rank() == 0:
             print('Using MPI backend with torch.distributed')
+    else:
+        torch.distributed.init_process_group(backend='nccl')
+        if torch.distributed.get_rank() == 0:
+            print('Using NCCL backend with torch.distributed')
 
-    # also handles --deepspeed
     parser = HfArgumentParser([TrainingArguments,ModelArguments, DataArguments])
 
     (training_args, model_args, data_args) = parser.parse_args_into_dataclasses()
+
+    # now set the local task id to 0 to enable DDP
+    training_args.local_rank = 0
 
     smiles_tokenizer_directory = model_args.smiles_tokenizer_dir
     smiles_model_directory = model_args.smiles_model_dir
@@ -304,7 +310,19 @@ def main():
         local_block_size=model_args.local_block_size,
     )
 
-    trainer = Trainer(
+    class MyTrainer(Trainer):
+        def create_optimizer(self):
+            optimizer = optim.Lamb(
+                self.model.parameters(),
+                lr=training_args.learning_rate,
+                betas=(training_args.adam_beta1, training_args.adam_beta2),
+                eps=training_args.adam_epsilon,
+                weight_decay=training_args.weight_decay,
+            )
+            self.optimizer=optimizer # don't forget to update the member variable
+            return optimizer
+
+    trainer = MyTrainer(
         model=model,
         args=training_args,                   # training arguments, defined above
         train_dataset=train_dataset,          # training dataset

@@ -2,3 +2,5 @@ seq_tokenizer/
 *.out
 *.e*
 *.o*
+__pycache__
+*~

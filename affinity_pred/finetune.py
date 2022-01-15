@@ -205,17 +205,16 @@ def main():
         torch.distributed.init_process_group(backend='mpi')
         if torch.distributed.get_rank() == 0:
             print('Using MPI backend with torch.distributed')
-    else:
-        torch.distributed.init_process_group(backend='nccl')
-        if torch.distributed.get_rank() == 0:
-            print('Using NCCL backend with torch.distributed')
 
     parser = HfArgumentParser([TrainingArguments,ModelArguments, DataArguments])
 
     (training_args, model_args, data_args) = parser.parse_args_into_dataclasses()
 
-    # now set the local task id to 0 to enable DDP
-    training_args.local_rank = 0
+    if 'LOCAL_RANK' in os.environ:
+        training_args.local_rank = int(os.environ["LOCAL_RANK"])
+    else:
+        # now set the local task id to 0 to enable DDP
+        training_args.local_rank = 0
 
     smiles_tokenizer_directory = model_args.smiles_tokenizer_dir
     smiles_model_directory = model_args.smiles_model_dir
@@ -318,6 +317,8 @@ def main():
                 betas=(training_args.adam_beta1, training_args.adam_beta2),
                 eps=training_args.adam_epsilon,
                 weight_decay=training_args.weight_decay,
+                debias=True,
+                prenorm=True,
             )
             self.optimizer=optimizer # don't forget to update the member variable
             return optimizer

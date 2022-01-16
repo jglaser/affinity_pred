@@ -7,6 +7,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch import Tensor
 
+from torch.utils import checkpoint
+
 # wrapper class for HAttention1D
 class BertHAttention1D(nn.Module):
     def __init__(
@@ -73,7 +75,7 @@ class BertHAttention1D(nn.Module):
                 attention_mask = (attention_mask >= 0)
             for dim in range(attention_mask.dim()-1,0,-1):
                 attention_mask = attention_mask.squeeze(dim)
-            attention_mask = attention_mask.type(torch.bool)
+            attention_mask = attention_mask.type(torch.int)
 
         pad_len_1 = 0
         pad_len_2 = 0
@@ -115,6 +117,8 @@ class BertLinearAttention(nn.Module):
     def __init__(
         self,
         config,
+        query_chunk_size=1024,
+        key_chunk_size=4096,
     ):
         super().__init__()
 
@@ -137,6 +141,9 @@ class BertLinearAttention(nn.Module):
         self.attn.to_q = torch.nn.Identity()
         self.attn.to_kv = torch.nn.Identity()
         self.attn.to_out = torch.nn.Identity()
+
+        self.query_chunk_size = query_chunk_size
+        self.key_chunk_size = key_chunk_size
 
     def forward(
         self,
@@ -167,7 +174,7 @@ class BertLinearAttention(nn.Module):
                 attention_mask = (attention_mask >= 0)
                 for dim in range(attention_mask.dim()-1,0,-1):
                     attention_mask = attention_mask.squeeze(dim)
-            attention_mask = attention_mask.type(torch.bool)
+            attention_mask = attention_mask.type(torch.int)
 
         kv = torch.stack([key_layer, value_layer], dim=2)
         kv = torch.flatten(kv, start_dim=2)
@@ -176,6 +183,8 @@ class BertLinearAttention(nn.Module):
             x=query_layer,
             context=kv,
             mask=attention_mask,
+            query_chunk_size=self.query_chunk_size,
+            key_chunk_size=self.key_chunk_size,
         )
 
         outputs = (context_layer, )
@@ -190,6 +199,8 @@ class CrossAttentionLayer(nn.Module):
             other_config,
             attn_mode='bert',
             local_block_size=16,
+            query_chunk_size=1024,
+            key_chunk_size=4096,
             mask_mode='mul',
             inv_fn=None,
             inv_fn_encoder=None,
@@ -211,7 +222,9 @@ class CrossAttentionLayer(nn.Module):
             )
         elif attn_mode == 'linear':
             self.crossattention.self = BertLinearAttention(
-                config=config
+                config=config,
+                query_chunk_size=query_chunk_size,
+                key_chunk_size=key_chunk_size,
             )
 
         self.inv_fn = inv_fn
@@ -283,7 +296,11 @@ class EnsembleEmbedding(torch.nn.Module):
             smiles_model_name,
             n_cross_attention_layers=3,
             attn_mode='bert',
-            local_block_size=16,
+            local_block_size=512,
+            query_chunk_size_seq=512,
+            query_chunk_size_smiles=512,
+            key_chunk_size_seq=512,
+            key_chunk_size_smiles=512,
         ):
         super().__init__()
 
@@ -310,7 +327,9 @@ class EnsembleEmbedding(torch.nn.Module):
                     )
                 elif self.attn_mode == 'linear':
                     attention = BertLinearAttention(
-                        config=seq_config
+                        config=seq_config,
+                        query_chunk_size=query_chunk_size_seq,
+                        key_chunk_size=key_chunk_size_seq,
                     )
 
                 attention.query = layer.attention.self.query
@@ -330,6 +349,8 @@ class EnsembleEmbedding(torch.nn.Module):
                 elif self.attn_mode == 'linear':
                     attention = BertLinearAttention(
                         config=smiles_config,
+                        query_chunk_size=query_chunk_size_smiles,
+                        key_chunk_size=key_chunk_size_smiles,
                     )
 
                 attention.query = layer.attention.self.query
@@ -346,6 +367,8 @@ class EnsembleEmbedding(torch.nn.Module):
                 other_config=smiles_config,
                 attn_mode=self.attn_mode,
                 local_block_size=local_block_size,
+                query_chunk_size=query_chunk_size_seq,
+                key_chunk_size=key_chunk_size_smiles,
                 inv_fn=self.seq_model.invert_attention_mask,
                 inv_fn_encoder=self.smiles_model.invert_attention_mask,
             ) for _ in range(n_cross_attention_layers)])
@@ -354,6 +377,8 @@ class EnsembleEmbedding(torch.nn.Module):
                 other_config=seq_config,
                 attn_mode=self.attn_mode,
                 local_block_size=local_block_size,
+                query_chunk_size=query_chunk_size_smiles,
+                key_chunk_size=key_chunk_size_seq,
                 inv_fn=self.smiles_model.invert_attention_mask,
                 inv_fn_encoder=self.seq_model.invert_attention_mask,
             ) for _ in range(n_cross_attention_layers)])
@@ -377,9 +402,9 @@ class EnsembleEmbedding(torch.nn.Module):
         hidden_states = list()
         for i_chunk in range(input_ids_1.size()[1]):
             # encode amino acids
-            encoder_outputs = self.seq_model(
-                input_ids=input_ids_1[:,i_chunk],
-                attention_mask=attention_mask_1[:,i_chunk],
+            encoder_outputs = checkpoint.checkpoint(self.seq_model,
+                input_ids_1[:,i_chunk],
+                attention_mask_1[:,i_chunk],
             )
             hidden_states += [encoder_outputs.last_hidden_state]
 

@@ -306,10 +306,9 @@ class EnsembleEmbedding(torch.nn.Module):
         self.seq_model = BertModel.from_pretrained(
             seq_model_name,
             config=seq_config,
-            add_pooling_layer=False,
         )
 
-        self.smiles_model = BertModel.from_pretrained(smiles_model_name, add_pooling_layer=False)
+        self.smiles_model = BertModel.from_pretrained(smiles_model_name)
 
         smiles_config = self.smiles_model.config
 
@@ -450,9 +449,10 @@ class EnsembleEmbedding(torch.nn.Module):
                 attention_mask_2,
             )
 
-        mean_seq = torch.mean(hidden_seq,axis=1)
-        mean_smiles = torch.mean(hidden_smiles,axis=1)
-        last_hidden_states = torch.cat([mean_seq, mean_smiles], dim=1)
+
+        cls_seq = self.seq_model.pooler(hidden_seq)
+        cls_smiles = self.smiles_model.pooler(hidden_smiles)
+        last_hidden_states = torch.cat([cls_seq, cls_smiles], dim=1)
 
         return last_hidden_states
 

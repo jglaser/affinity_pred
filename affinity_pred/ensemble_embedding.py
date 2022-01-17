@@ -287,9 +287,9 @@ class EnsembleEmbedding(torch.nn.Module):
             n_cross_attention_layers=3,
             attn_mode='bert',
             local_block_size=512,
-            query_chunk_size_seq=512,
+            query_chunk_size_seq=256,
             query_chunk_size_smiles=512,
-            key_chunk_size_seq=512,
+            key_chunk_size_seq=256,
             key_chunk_size_smiles=512,
         ):
         super().__init__()

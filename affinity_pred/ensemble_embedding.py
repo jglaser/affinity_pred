@@ -241,22 +241,12 @@ class CrossAttentionLayer(nn.Module):
     def forward(
         self,
         hidden_states,
-        attention_mask=None,
-        head_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        past_key_value=None,
+        encoder_hidden_states,
+        encoder_attention_mask,
         output_attentions=False,
     ):
 
         if self.mask_mode == 'mul' and self.attn_mode=='bert':
-            if attention_mask is not None:
-                if self.inv_fn is None:
-                    raise ValueError("Need inversion function multiplicative -> additive for attention mask")
-
-                # invert attention mask
-                attention_mask = self.inv_fn(attention_mask)
-
             if encoder_attention_mask is not None:
                 if self.inv_fn_encoder is None:
                     raise ValueError("Need encoder inversion function multiplicative -> additive for attention mask")
@@ -266,12 +256,9 @@ class CrossAttentionLayer(nn.Module):
 
         cross_attention_outputs = self.crossattention(
             hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            head_mask=head_mask,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
             output_attentions=output_attentions,
-            past_key_value=None
         )
         attention_output = cross_attention_outputs[0]
         outputs = cross_attention_outputs[1:]  # add cross attentions if we output attention weights
@@ -289,6 +276,15 @@ class CrossAttentionLayer(nn.Module):
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
+class BertModelWrapperIgnores1stArg(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, dummy_arg=None, *args):
+        assert dummy_arg is not None
+        return self.module(*args, return_dict=False)
+
 class EnsembleEmbedding(torch.nn.Module):
     def __init__(
             self,
@@ -304,30 +300,28 @@ class EnsembleEmbedding(torch.nn.Module):
         ):
         super().__init__()
 
-        self.seq_model = BertModel.from_pretrained(seq_model_name)
-        self.smiles_model = BertModel.from_pretrained(smiles_model_name)
+        self.seq_model = BertModel.from_pretrained(seq_model_name, add_pooling_layer=False)
+        self.smiles_model = BertModel.from_pretrained(smiles_model_name, add_pooling_layer=False)
 
-        seq_config = self.seq_model.config
         smiles_config = self.smiles_model.config
 
-        self.aggregate_hidden_size = seq_config.hidden_size+smiles_config.hidden_size
+        self.aggregate_hidden_size =self.seq_model.config.hidden_size+smiles_config.hidden_size
 
-        self.attn_mode = attn_mode
+        if attn_mode != 'bert':
 
-        if self.attn_mode != 'bert':
             # swap the self-attention layers
             seq_layers = self.seq_model.encoder.layer
 
             for layer in seq_layers:
-                if self.attn_mode == 'hierarchical':
+                if attn_mode == 'hierarchical':
                     attention = BertHAttention1D(
-                        config=seq_config,
+                        config=self.seq_model.config,
                         mask_mode='add',
                         local_block_size=local_block_size,
                     )
-                elif self.attn_mode == 'linear':
+                elif attn_mode == 'linear':
                     attention = BertLinearAttention(
-                        config=seq_config,
+                        config=self.seq_model.config,
                         query_chunk_size=query_chunk_size_seq,
                         key_chunk_size=key_chunk_size_seq,
                     )
@@ -340,13 +334,13 @@ class EnsembleEmbedding(torch.nn.Module):
 
             smiles_layers = self.smiles_model.encoder.layer
             for layer in smiles_layers:
-                if self.attn_mode == 'hierarchical':
+                if attn_mode == 'hierarchical':
                     attention = BertHAttention1D(
                         config=smiles_config,
                         mask_mode='add',
                         local_block_size=local_block_size,
                     )
-                elif self.attn_mode == 'linear':
+                elif attn_mode == 'linear':
                     attention = BertLinearAttention(
                         config=smiles_config,
                         query_chunk_size=query_chunk_size_smiles,
@@ -363,9 +357,9 @@ class EnsembleEmbedding(torch.nn.Module):
         self.n_cross_attention_layers = n_cross_attention_layers
 
         self.cross_attention_seq = nn.ModuleList([CrossAttentionLayer(
-                config=seq_config,
+                config=self.seq_model.config,
                 other_config=smiles_config,
-                attn_mode=self.attn_mode,
+                attn_mode=attn_mode,
                 local_block_size=local_block_size,
                 query_chunk_size=query_chunk_size_seq,
                 key_chunk_size=key_chunk_size_smiles,
@@ -374,14 +368,19 @@ class EnsembleEmbedding(torch.nn.Module):
             ) for _ in range(n_cross_attention_layers)])
         self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(
                 config=smiles_config,
-                other_config=seq_config,
-                attn_mode=self.attn_mode,
+                other_config=self.seq_model.config,
+                attn_mode=attn_mode,
                 local_block_size=local_block_size,
                 query_chunk_size=query_chunk_size_smiles,
                 key_chunk_size=key_chunk_size_seq,
                 inv_fn=self.smiles_model.invert_attention_mask,
                 inv_fn_encoder=self.seq_model.invert_attention_mask,
             ) for _ in range(n_cross_attention_layers)])
+
+        # workaround for checkpoint with gradient-less inputs
+        # https://discuss.pytorch.org/t/checkpoint-with-no-grad-requiring-inputs-problem/19117/11
+        self.dummy_tensor = torch.ones(1, dtype=torch.float32, requires_grad=True)
+        self.seq_model_wrapper = BertModelWrapperIgnores1stArg(self.seq_model)
 
     def forward(
             self,
@@ -398,15 +397,16 @@ class EnsembleEmbedding(torch.nn.Module):
             if attention_mask_1 is not None:
                 attention_mask_1 = attention_mask_1[:, None, :]
 
-        # embed each chunk separately, then concatenate hidden states
         hidden_states = list()
         for i_chunk in range(input_ids_1.size()[1]):
-            # encode amino acids
-            encoder_outputs = checkpoint.checkpoint(self.seq_model,
+            # embed amino acids, sharing the same model
+            encoder_outputs = checkpoint.checkpoint(
+                self.seq_model_wrapper,
+                self.dummy_tensor,
                 input_ids_1[:,i_chunk],
                 attention_mask_1[:,i_chunk],
             )
-            hidden_states += [encoder_outputs.last_hidden_state]
+            hidden_states += [encoder_outputs[0]]
 
         hidden_seq = torch.cat(hidden_states,dim=1)
         attention_mask_1 = torch.flatten(attention_mask_1,start_dim=1)
@@ -418,31 +418,33 @@ class EnsembleEmbedding(torch.nn.Module):
         )
         hidden_smiles = encoder_outputs.last_hidden_state
 
+        def cross(attn_1, attn_2, hidden_1, hidden_2, attention_mask_1, attention_mask_2):
+            attention_output_1 = attn_1(
+                hidden_1,
+                hidden_2,
+                attention_mask_2,
+            )
+            attention_output_2 = attn_2(
+                hidden_2,
+                hidden_1,
+                attention_mask_1,
+            )
+            return attention_output_1[0], attention_output_2[0]
+
         for i in range(self.n_cross_attention_layers):
-            attention_output_1 = self.cross_attention_seq[i](
-                hidden_states=hidden_seq,
-                encoder_hidden_states=hidden_smiles,
-                encoder_attention_mask=attention_mask_2,
-                output_attentions=output_attentions,
+            hidden_seq, hidden_smiles = checkpoint.checkpoint(
+                cross,
+                self.cross_attention_seq[i],
+                self.cross_attention_smiles[i],
+                hidden_seq,
+                hidden_smiles,
+                attention_mask_1,
+                attention_mask_2,
             )
-
-            attention_output_2 = self.cross_attention_smiles[i](
-                hidden_states=hidden_smiles,
-                encoder_hidden_states=hidden_seq,
-                encoder_attention_mask=attention_mask_1,
-                output_attentions=output_attentions,
-            )
-
-            hidden_seq = attention_output_1[0]
-            hidden_smiles = attention_output_2[0]
 
         mean_seq = torch.mean(hidden_seq,axis=1)
         mean_smiles = torch.mean(hidden_smiles,axis=1)
         last_hidden_states = torch.cat([mean_seq, mean_smiles], dim=1)
-
-        if output_attentions:
-            attentions_seq = attention_output_1[1]
-            attentions_smiles = attention_output_2[1]
 
         return last_hidden_states
 

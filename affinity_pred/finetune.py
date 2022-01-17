@@ -233,6 +233,9 @@ def main():
         # now set the local task id to 0 to enable DDP
         training_args.local_rank = 0
 
+    # error out if there are parameters for which gradients are not computed (useful for debugging)
+    training_args.ddp_find_unused_parameters=False
+
     smiles_tokenizer_directory = model_args.smiles_tokenizer_dir
     smiles_model_directory = model_args.smiles_model_dir
     tokenizer_config = json.load(open(smiles_tokenizer_directory+'/config.json','r'))

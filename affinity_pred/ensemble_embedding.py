@@ -299,7 +299,12 @@ class EnsembleEmbedding(torch.nn.Module):
             config=seq_config,
         )
 
-        self.smiles_model = BertModel.from_pretrained(smiles_model_name)
+        smiles_config = BertConfig.from_pretrained(smiles_model_name)
+        smiles_config.gradient_checkpointing = True
+        self.smiles_model = BertModel.from_pretrained(
+            smiles_model_name,
+            config=smiles_config
+        )
 
         smiles_config = self.smiles_model.config
 

@@ -133,11 +133,6 @@ class ModelArguments:
         default=512
     )
 
-    # the maximum sentence length the sequence model was trained on
-    seq_chunk_size: int = field(
-        default=512
-    )
-
     attn_mode: str = field(
         default='bert'
     )
@@ -177,35 +172,16 @@ class DataArguments:
 def main():
     # on-the-fly tokenization
     def encode(item):
-        def chunks(lst, n, pad_len=None):
-            if pad_len is None:
-                pad_len = len(lst)
-            for i in range(0, pad_len, n):
-                yield lst[i:i + n]
+        seq_encodings = seq_tokenizer(expand_seqs(item['seq'])[0],
+                                 is_split_into_words=True,
+                                 return_offsets_mapping=False,
+                                 truncation=True,
+                                 padding='max_length',
+                                 add_special_tokens=True,
+                                 max_length=max_seq_length)
 
-        # split the input sequence into chunks that can be forwarded to the pre-trained model
-        max_len = seq_chunk_size - 2 # account for [CLS] and [SEP]
-        pad_len = ((max_seq_length+seq_chunk_size-1)//seq_chunk_size)*max_len
-        seq_encodings = list()
-        for chunk in chunks(expand_seqs(item['seq'])[0],max_len,pad_len):
-            # circumvent a BertTokenizer issue with empty chunks
-            chunk_encoding = seq_tokenizer(chunk if len(chunk) > 0 else '',
-                                     is_split_into_words=(len(chunk) > 0),
-                                     return_offsets_mapping=False,
-                                     truncation=True,
-                                     padding='max_length',
-                                     add_special_tokens=True,
-                                     max_length=seq_chunk_size)
-            seq_encodings += [chunk_encoding]
-
-        item['input_ids_1'] = list()
-        item['attention_mask_1'] = list()
-        for encoding in seq_encodings:
-            item['input_ids_1'] += [encoding['input_ids']]
-            item['attention_mask_1'] += [encoding['attention_mask']]
-
-        item['input_ids_1'] = [torch.tensor(item['input_ids_1'])]
-        item['attention_mask_1'] = [torch.tensor(item['attention_mask_1'])]
+        item['input_ids_1'] = [torch.tensor(seq_encodings['input_ids'])]
+        item['attention_mask_1'] = [torch.tensor(seq_encodings['attention_mask'])]
 
         smiles_encodings = smiles_tokenizer(item['smiles_can'][0],
                                             padding='max_length',
@@ -255,7 +231,6 @@ def main():
         seq_tokenizer.save_pretrained('seq_tokenizer/')
 
     max_seq_length = model_args.max_seq_length
-    seq_chunk_size = model_args.seq_chunk_size
 
     # seed the weight initialization
     torch.manual_seed(training_args.seed)

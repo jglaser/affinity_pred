@@ -399,24 +399,14 @@ class EnsembleEmbedding(torch.nn.Module):
     ):
         outputs = []
 
-        if input_ids_1.dim() == 2:
-            input_ids_1 = input_ids_1[:, None, :]
-            if attention_mask_1 is not None:
-                attention_mask_1 = attention_mask_1[:, None, :]
-
-        hidden_states = list()
-        for i_chunk in range(input_ids_1.size()[1]):
-            # embed amino acids, sharing the same model
-            encoder_outputs = checkpoint.checkpoint(
-                self.seq_model_wrapper,
-                self.dummy_tensor,
-                input_ids_1[:,i_chunk],
-                attention_mask_1[:,i_chunk],
-            )
-            hidden_states += [encoder_outputs[0]]
-
-        hidden_seq = torch.cat(hidden_states,dim=1)
-        attention_mask_1 = torch.flatten(attention_mask_1,start_dim=1)
+        # embed amino acids, sharing the same model
+        encoder_outputs = checkpoint.checkpoint(
+            self.seq_model_wrapper,
+            self.dummy_tensor,
+            input_ids_1,
+            attention_mask_1,
+        )
+        hidden_seq = encoder_outputs[0]
 
         # encode SMILES
         encoder_outputs = self.smiles_model(

@@ -233,7 +233,7 @@ def main():
         # now set the local task id to 0 to enable DDP
         training_args.local_rank = 0
 
-    # gradient checkpointing doesn't work with distributed data parallel
+    # error out if there are parameters for which gradients are not computed (useful for debugging)
     training_args.ddp_find_unused_parameters=False
 
     smiles_tokenizer_directory = model_args.smiles_tokenizer_dir
@@ -324,7 +324,6 @@ def main():
     model = ProteinLigandAffinity(
         model_args.seq_model_name,
         smiles_model_directory,
-        n_seq_models=model_args.max_seq_length//model_args.seq_chunk_size,
         n_cross_attention_layers=model_args.n_cross_attention,
         attn_mode=model_args.attn_mode,
         local_block_size=model_args.local_block_size,

@@ -291,6 +291,7 @@ class EnsembleEmbedding(torch.nn.Module):
             seq_model_name,
             smiles_model_name,
             n_cross_attention_layers=3,
+            n_seq_models=1,
             attn_mode='bert',
             local_block_size=512,
             query_chunk_size_seq=512,
@@ -300,37 +301,41 @@ class EnsembleEmbedding(torch.nn.Module):
         ):
         super().__init__()
 
-        self.seq_model = BertModel.from_pretrained(seq_model_name, add_pooling_layer=False)
+        self.seq_model = nn.ModuleList(
+            [ BertModel.from_pretrained(seq_model_name, add_pooling_layer=False) for _ in range(n_seq_models) ]
+        )
+
         self.smiles_model = BertModel.from_pretrained(smiles_model_name, add_pooling_layer=False)
 
         smiles_config = self.smiles_model.config
 
-        self.aggregate_hidden_size =self.seq_model.config.hidden_size+smiles_config.hidden_size
+        self.aggregate_hidden_size = self.seq_model[0].config.hidden_size+smiles_config.hidden_size
 
         if attn_mode != 'bert':
 
-            # swap the self-attention layers
-            seq_layers = self.seq_model.encoder.layer
+            for seq_model in self.seq_model:
+                # swap the self-attention layers
+                seq_layers = seq_model.encoder.layer
 
-            for layer in seq_layers:
-                if attn_mode == 'hierarchical':
-                    attention = BertHAttention1D(
-                        config=self.seq_model.config,
-                        mask_mode='add',
-                        local_block_size=local_block_size,
-                    )
-                elif attn_mode == 'linear':
-                    attention = BertLinearAttention(
-                        config=self.seq_model.config,
-                        query_chunk_size=query_chunk_size_seq,
-                        key_chunk_size=key_chunk_size_seq,
-                    )
+                for layer in seq_layers:
+                    if attn_mode == 'hierarchical':
+                        attention = BertHAttention1D(
+                            config=seq_model.config,
+                            mask_mode='add',
+                            local_block_size=local_block_size,
+                        )
+                    elif attn_mode == 'linear':
+                        attention = BertLinearAttention(
+                            config=seq_model.config,
+                            query_chunk_size=query_chunk_size_seq,
+                            key_chunk_size=key_chunk_size_seq,
+                        )
 
-                attention.query = layer.attention.self.query
-                attention.key = layer.attention.self.key
-                attention.value = layer.attention.self.value
+                    attention.query = layer.attention.self.query
+                    attention.key = layer.attention.self.key
+                    attention.value = layer.attention.self.value
 
-                layer.attention.self = attention
+                    layer.attention.self = attention
 
             smiles_layers = self.smiles_model.encoder.layer
             for layer in smiles_layers:
@@ -357,30 +362,32 @@ class EnsembleEmbedding(torch.nn.Module):
         self.n_cross_attention_layers = n_cross_attention_layers
 
         self.cross_attention_seq = nn.ModuleList([CrossAttentionLayer(
-                config=self.seq_model.config,
+                config=self.seq_model[0].config,
                 other_config=smiles_config,
                 attn_mode=attn_mode,
                 local_block_size=local_block_size,
                 query_chunk_size=query_chunk_size_seq,
                 key_chunk_size=key_chunk_size_smiles,
-                inv_fn=self.seq_model.invert_attention_mask,
+                inv_fn=self.seq_model[0].invert_attention_mask,
                 inv_fn_encoder=self.smiles_model.invert_attention_mask,
             ) for _ in range(n_cross_attention_layers)])
         self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(
                 config=smiles_config,
-                other_config=self.seq_model.config,
+                other_config=self.seq_model[0].config,
                 attn_mode=attn_mode,
                 local_block_size=local_block_size,
                 query_chunk_size=query_chunk_size_smiles,
                 key_chunk_size=key_chunk_size_seq,
                 inv_fn=self.smiles_model.invert_attention_mask,
-                inv_fn_encoder=self.seq_model.invert_attention_mask,
+                inv_fn_encoder=self.seq_model[0].invert_attention_mask,
             ) for _ in range(n_cross_attention_layers)])
 
         # workaround for checkpoint with gradient-less inputs
         # https://discuss.pytorch.org/t/checkpoint-with-no-grad-requiring-inputs-problem/19117/11
-        self.dummy_tensor = torch.ones(1, dtype=torch.float32, requires_grad=True)
-        self.seq_model_wrapper = BertModelWrapperIgnores1stArg(self.seq_model)
+        self.dummy_tensor = [ torch.ones(1, dtype=torch.float32, requires_grad=True) for _ in self.seq_model ]
+        self.seq_model_wrapper = nn.ModuleList(
+            [ BertModelWrapperIgnores1stArg(seq_model) for seq_model in self.seq_model ]
+        )
 
     def forward(
             self,
@@ -397,12 +404,15 @@ class EnsembleEmbedding(torch.nn.Module):
             if attention_mask_1 is not None:
                 attention_mask_1 = attention_mask_1[:, None, :]
 
+        if input_ids_1.size()[1] != len(self.seq_model):
+            raise ValueError("Number of sequence models must be equal to the number of chunks.")
+
         hidden_states = list()
         for i_chunk in range(input_ids_1.size()[1]):
             # embed amino acids, sharing the same model
             encoder_outputs = checkpoint.checkpoint(
-                self.seq_model_wrapper,
-                self.dummy_tensor,
+                self.seq_model_wrapper[i_chunk],
+                self.dummy_tensor[i_chunk],
                 input_ids_1[:,i_chunk],
                 attention_mask_1[:,i_chunk],
             )

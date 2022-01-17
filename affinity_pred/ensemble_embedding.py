@@ -277,6 +277,9 @@ class CrossAttentionLayer(nn.Module):
         return layer_output
 
 class EnsembleEmbedding(torch.nn.Module):
+
+    supports_gradient_checkpointing = True
+
     def __init__(
             self,
             seq_model_name,
@@ -291,20 +294,9 @@ class EnsembleEmbedding(torch.nn.Module):
         ):
         super().__init__()
 
-        seq_config = BertConfig.from_pretrained(seq_model_name)
-        # enable gradient checkpointing to lower memory footprint
-        seq_config.gradient_checkpointing = True
-        self.seq_model = BertModel.from_pretrained(
-            seq_model_name,
-            config=seq_config,
-        )
+        self.seq_model = BertModel.from_pretrained(seq_model_name)
 
-        smiles_config = BertConfig.from_pretrained(smiles_model_name)
-        smiles_config.gradient_checkpointing = True
-        self.smiles_model = BertModel.from_pretrained(
-            smiles_model_name,
-            config=smiles_config
-        )
+        self.smiles_model = BertModel.from_pretrained(smiles_model_name)
 
         smiles_config = self.smiles_model.config
 
@@ -380,6 +372,16 @@ class EnsembleEmbedding(torch.nn.Module):
                 inv_fn_encoder=self.seq_model.invert_attention_mask,
             ) for _ in range(n_cross_attention_layers)])
 
+    def gradient_checkpointing_enable(self):
+        self.gradient_checkpointing = True
+        self.seq_model.gradient_checkpointing_enable()
+        self.smiles_model.gradient_checkpointing_enable()
+
+    def gradient_checkpointing_disable(self):
+        self.gradient_checkpointing = False
+        self.seq_model.gradient_checkpointing_disable()
+        self.smiles_model.gradient_checkpointing_disable()
+
     def forward(
             self,
             input_ids_1=None,
@@ -418,16 +420,25 @@ class EnsembleEmbedding(torch.nn.Module):
             return attention_output_1[0], attention_output_2[0]
 
         for i in range(self.n_cross_attention_layers):
-            hidden_seq, hidden_smiles = checkpoint.checkpoint(
-                cross,
-                self.cross_attention_seq[i],
-                self.cross_attention_smiles[i],
-                hidden_seq,
-                hidden_smiles,
-                attention_mask_1,
-                attention_mask_2,
-            )
-
+            if self.gradient_checkpointing:
+                hidden_seq, hidden_smiles = checkpoint.checkpoint(
+                    cross,
+                    self.cross_attention_seq[i],
+                    self.cross_attention_smiles[i],
+                    hidden_seq,
+                    hidden_smiles,
+                    attention_mask_1,
+                    attention_mask_2,
+                )
+            else:
+                hidden_seq, hidden_smiles = cross(
+                    self.cross_attention_seq[i],
+                    self.cross_attention_smiles[i],
+                    hidden_seq,
+                    hidden_smiles,
+                    attention_mask_1,
+                    attention_mask_2,
+                )
 
         cls_seq = self.seq_model.pooler(hidden_seq)
         cls_smiles = self.smiles_model.pooler(hidden_smiles)
@@ -435,21 +446,18 @@ class EnsembleEmbedding(torch.nn.Module):
 
         return last_hidden_states
 
-class ProteinLigandAffinity(torch.nn.Module):
+class ProteinLigandAffinity(EnsembleEmbedding):
     def __init__(self,
             seq_model_name,
             smiles_model_name,
             **kwargs
             ):
-        super().__init__()
-
-        self.embedding = EnsembleEmbedding(
+        super().__init__(
             seq_model_name,
             smiles_model_name,
-            **kwargs
-        )
+            **kwargs)
 
-        self.linear = torch.nn.Linear(self.embedding.aggregate_hidden_size, 1)
+        self.linear = torch.nn.Linear(self.aggregate_hidden_size, 1)
 
     def forward(
             self,
@@ -460,7 +468,7 @@ class ProteinLigandAffinity(torch.nn.Module):
             labels=None,
             output_attentions=False,
     ):
-        embedding = self.embedding(
+        embedding = super().forward(
             input_ids_1=input_ids_1,
             attention_mask_1=attention_mask_1,
             input_ids_2=input_ids_2,

@@ -276,15 +276,6 @@ class CrossAttentionLayer(nn.Module):
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
-class BertModelWrapperIgnores1stArg(nn.Module):
-    def __init__(self, module):
-        super().__init__()
-        self.module = module
-
-    def forward(self, dummy_arg=None, *args):
-        assert dummy_arg is not None
-        return self.module(*args, return_dict=False)
-
 class EnsembleEmbedding(torch.nn.Module):
     def __init__(
             self,
@@ -384,11 +375,6 @@ class EnsembleEmbedding(torch.nn.Module):
                 inv_fn_encoder=self.seq_model.invert_attention_mask,
             ) for _ in range(n_cross_attention_layers)])
 
-        # workaround for checkpoint with gradient-less inputs
-        # https://discuss.pytorch.org/t/checkpoint-with-no-grad-requiring-inputs-problem/19117/11
-        self.dummy_tensor = torch.ones(1, dtype=torch.float32, requires_grad=True)
-        self.seq_model_wrapper = BertModelWrapperIgnores1stArg(self.seq_model)
-
     def forward(
             self,
             input_ids_1=None,
@@ -400,13 +386,11 @@ class EnsembleEmbedding(torch.nn.Module):
         outputs = []
 
         # embed amino acids, sharing the same model
-        encoder_outputs = checkpoint.checkpoint(
-            self.seq_model_wrapper,
-            self.dummy_tensor,
-            input_ids_1,
-            attention_mask_1,
+        encoder_outputs = self.seq_model(
+            input_ids=input_ids_1,
+            attention_mask=attention_mask_1,
         )
-        hidden_seq = encoder_outputs[0]
+        hidden_seq = encoder_outputs.last_hidden_state
 
         # encode SMILES
         encoder_outputs = self.smiles_model(

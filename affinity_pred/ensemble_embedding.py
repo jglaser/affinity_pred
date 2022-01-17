@@ -301,9 +301,20 @@ class EnsembleEmbedding(torch.nn.Module):
         ):
         super().__init__()
 
+        seq_config = BertConfig.from_pretrained(seq_model_name)
+        # enable gradient checkpointing to lower memory footprint
+        seq_config.gradient_checkpointing = True
+
         self.seq_model = nn.ModuleList(
-            [ BertModel.from_pretrained(seq_model_name, add_pooling_layer=False) for _ in range(n_seq_models) ]
+            [ BertModel.from_pretrained(
+                seq_model_name,
+                config=seq_config,
+                add_pooling_layer=False,
+              ) for _ in range(n_seq_models) ]
         )
+
+        for seq_model in self.seq_model:
+            seq_model.config.gradient_checkpointing = True
 
         self.smiles_model = BertModel.from_pretrained(smiles_model_name, add_pooling_layer=False)
 

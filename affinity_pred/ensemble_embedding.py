@@ -294,6 +294,8 @@ class EnsembleEmbedding(torch.nn.Module):
         ):
         super().__init__()
 
+        self.gradient_checkpointing = False
+
         self.seq_model = BertModel.from_pretrained(seq_model_name)
 
         self.smiles_model = BertModel.from_pretrained(smiles_model_name)

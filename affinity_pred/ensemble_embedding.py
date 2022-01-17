@@ -75,7 +75,7 @@ class BertHAttention1D(nn.Module):
                 attention_mask = (attention_mask >= 0)
             for dim in range(attention_mask.dim()-1,0,-1):
                 attention_mask = attention_mask.squeeze(dim)
-            attention_mask = attention_mask.type(torch.int)
+            attention_mask = attention_mask.type(torch.bool)
 
         pad_len_1 = 0
         pad_len_2 = 0
@@ -174,7 +174,7 @@ class BertLinearAttention(nn.Module):
                 attention_mask = (attention_mask >= 0)
                 for dim in range(attention_mask.dim()-1,0,-1):
                     attention_mask = attention_mask.squeeze(dim)
-            attention_mask = attention_mask.type(torch.int)
+            attention_mask = attention_mask.type(torch.bool)
 
         kv = torch.stack([key_layer, value_layer], dim=2)
         kv = torch.flatten(kv, start_dim=2)
@@ -483,9 +483,12 @@ class ProteinLigandAffinity(torch.nn.Module):
 
         logits = self.linear(embedding)
 
+        # convert to float32 at the end to work around bug with MPI backend
+        logits = logits.type(torch.float32)
+
         if labels is not None:
             loss_fct = torch.nn.MSELoss()
-            loss = loss_fct(logits.view(-1, 1), labels.view(-1,1).type(self.linear.weight.dtype))
+            loss = loss_fct(logits.view(-1, 1), labels.view(-1,1).type(logits.dtype))
             return (loss, logits)
         else:
             return logits

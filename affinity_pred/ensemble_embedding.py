@@ -29,6 +29,8 @@ class BertHAttention1D(nn.Module):
         dtype = self.query.weight.dtype
         eps = 1e-4 if dtype == torch.float16 else 1e-9
 
+        from h_transformer_1d.h_transformer_1d import HAttention1D
+
         self.attn = HAttention1D(
             dim=config.hidden_size,
             heads=config.num_attention_heads,
@@ -287,9 +289,9 @@ class EnsembleEmbedding(torch.nn.Module):
             n_cross_attention_layers=3,
             attn_mode='bert',
             local_block_size=512,
-            query_chunk_size_seq=256,
+            query_chunk_size_seq=2048,
+            key_chunk_size_seq=2048,
             query_chunk_size_smiles=512,
-            key_chunk_size_seq=256,
             key_chunk_size_smiles=512,
         ):
         super().__init__()

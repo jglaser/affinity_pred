@@ -133,6 +133,10 @@ class ModelArguments:
         default=512
     )
 
+    max_smiles_length: int = field(
+        default=512
+    )
+
     attn_mode: str = field(
         default='bert'
     )
@@ -142,15 +146,15 @@ class ModelArguments:
     )
 
     attn_query_chunk_size_seq: int = field(
-        default=256,
-    )
-
-    attn_query_chunk_size_smiles: int = field(
-        default=256,
+        default=2048,
     )
 
     attn_key_chunk_size_seq: int = field(
-        default=512
+        default=2048,
+    )
+
+    attn_query_chunk_size_smiles: int = field(
+        default=512,
     )
 
     attn_key_chunk_size_smiles: int = field(
@@ -185,7 +189,7 @@ def main():
 
         smiles_encodings = smiles_tokenizer(item['smiles_can'][0],
                                             padding='max_length',
-                                            max_length=smiles_tokenizer.model_max_length,
+                                            max_length=max_smiles_length,
                                             add_special_tokens=True,
                                             truncation=True)
 
@@ -231,6 +235,7 @@ def main():
         seq_tokenizer.save_pretrained('seq_tokenizer/')
 
     max_seq_length = model_args.max_seq_length
+    max_smiles_length = min(smiles_tokenizer.model_max_length, model_args.max_smiles_length)
 
     # seed the weight initialization
     torch.manual_seed(training_args.seed)

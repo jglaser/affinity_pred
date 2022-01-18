@@ -134,7 +134,7 @@ class ModelArguments:
     )
 
     max_smiles_length: int = field(
-        default=512
+        default=200
     )
 
     attn_mode: str = field(
@@ -313,21 +313,7 @@ def main():
         key_chunk_size_smiles=model_args.attn_key_chunk_size_smiles,
     )
 
-    class MyTrainer(Trainer):
-        def create_optimizer(self):
-            optimizer = optim.Lamb(
-                self.model.parameters(),
-                lr=training_args.learning_rate,
-                betas=(training_args.adam_beta1, training_args.adam_beta2),
-                eps=training_args.adam_epsilon,
-                weight_decay=training_args.weight_decay,
-                debias=True,
-                prenorm=True,
-            )
-            self.optimizer=optimizer # don't forget to update the member variable
-            return optimizer
-
-    trainer = MyTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,                   # training arguments, defined above
         train_dataset=train_dataset,          # training dataset

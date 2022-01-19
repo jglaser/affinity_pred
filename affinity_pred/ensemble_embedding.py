@@ -9,8 +9,6 @@ from torch import Tensor
 
 from torch.utils import checkpoint
 
-import math
-
 # wrapper class for HAttention1D
 class BertHAttention1D(nn.Module):
     def __init__(
@@ -117,7 +115,7 @@ class BertHAttention1D(nn.Module):
         return outputs
 
 # attention with O(N) memory footprint
-class BertLinearMemAttention(nn.Module):
+class BertLinearAttention(nn.Module):
     def __init__(
         self,
         config,
@@ -195,92 +193,6 @@ class BertLinearMemAttention(nn.Module):
 
         return outputs
 
-# a linear version of the self attention (without softmax) for residual connections
-class BertLinearSelfAttention(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
-            raise ValueError(
-                f"The hidden size ({config.hidden_size}) is not a multiple of the number of attention "
-                f"heads ({config.num_attention_heads})"
-            )
-
-        self.num_attention_heads = config.num_attention_heads
-        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
-        self.all_head_size = self.num_attention_heads * self.attention_head_size
-
-        self.query = nn.Linear(config.hidden_size, self.all_head_size)
-        self.key = nn.Linear(config.hidden_size, self.all_head_size)
-        self.value = nn.Linear(config.hidden_size, self.all_head_size)
-
-        self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
-
-    def transpose_for_scores(self, x):
-        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        x = x.view(*new_x_shape)
-        return x.permute(0, 2, 1, 3)
-
-    def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-        head_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        past_key_value=None,
-        output_attentions=False,
-    ):
-        mixed_query_layer = self.query(hidden_states)
-
-        # If this is instantiated as a cross-attention module, the keys
-        # and values come from an encoder; the attention mask needs to be
-        # such that the encoder's padding tokens are not attended to.
-        is_cross_attention = encoder_hidden_states is not None
-
-        if is_cross_attention:
-            key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
-            value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
-            attention_mask = encoder_attention_mask
-        else:
-            key_layer = self.transpose_for_scores(self.key(hidden_states))
-            value_layer = self.transpose_for_scores(self.value(hidden_states))
-
-        query_layer = self.transpose_for_scores(mixed_query_layer)
-
-        # Take the dot product between "query" and "key" to get the raw attention scores.
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-
-        attention_probs = attention_scores / math.sqrt(self.attention_head_size)
-        if attention_mask is not None:
-            # convert to 0/1
-            attention_mask = (attention_mask >= 0).int()
-            attention_probs = attention_scores * attention_mask
-
-        # This is actually dropping out entire tokens to attend to, which might
-        # seem a bit unusual, but is taken from the original Transformer paper.
-        attention_probs = self.dropout(attention_probs)
-
-        context_layer = torch.matmul(attention_probs, value_layer)
-
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(*new_context_layer_shape)
-
-        outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
-
-        return outputs
-
-# linear residual connection (without LayerNorm)
-class BertLinearSelfOutput(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-
-    def forward(self, hidden_states, input_tensor):
-        hidden_states = self.dense(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        return hidden_states + input_tensor
 
 class CrossAttentionLayer(nn.Module):
     def __init__(
@@ -292,6 +204,7 @@ class CrossAttentionLayer(nn.Module):
             query_chunk_size=1024,
             key_chunk_size=4096,
             mask_mode='mul',
+            inv_fn=None,
             inv_fn_encoder=None,
         ):
         super().__init__()
@@ -300,15 +213,7 @@ class CrossAttentionLayer(nn.Module):
 
         self.crossattention = BertAttention(config)
 
-        # linear residual connection
-        self.linear_crossattention = BertAttention(config)
-        self.linear_crossattention.self = BertLinearSelfAttention(config)
-        self.linear_crossattention.output =  BertLinearSelfOutput(config)
-
-        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-
-        if attn_mode not in ('bert','hierarchical','linear_mem'):
+        if attn_mode not in ('bert','hierarchical','linear'):
             raise ValueError
 
         if attn_mode == 'hierarchical':
@@ -317,13 +222,14 @@ class CrossAttentionLayer(nn.Module):
                 mask_mode=mask_mode,
                 local_block_size=local_block_size,
             )
-        elif attn_mode == 'linear_mem':
-            self.crossattention.self = BertLinearMemAttention(
+        elif attn_mode == 'linear':
+            self.crossattention.self = BertLinearAttention(
                 config=config,
                 query_chunk_size=query_chunk_size,
                 key_chunk_size=key_chunk_size,
             )
 
+        self.inv_fn = inv_fn
         self.inv_fn_encoder = inv_fn_encoder
         self.mask_mode = mask_mode
         self.attn_mode = attn_mode
@@ -334,9 +240,6 @@ class CrossAttentionLayer(nn.Module):
         self.crossattention.self.key = nn.Linear(other_config.hidden_size, self.crossattention.self.all_head_size)
         self.crossattention.self.value = nn.Linear(other_config.hidden_size, self.crossattention.self.all_head_size)
 
-        self.linear_crossattention.self.key = nn.Linear(other_config.hidden_size, self.crossattention.self.all_head_size)
-        self.linear_crossattention.self.value = nn.Linear(other_config.hidden_size, self.crossattention.self.all_head_size)
-
     def forward(
         self,
         hidden_states,
@@ -345,14 +248,13 @@ class CrossAttentionLayer(nn.Module):
         output_attentions=False,
     ):
 
-        inv_encoder_attention_mask = self.inv_fn_encoder(encoder_attention_mask)
         if self.mask_mode == 'mul' and self.attn_mode=='bert':
             if encoder_attention_mask is not None:
                 if self.inv_fn_encoder is None:
                     raise ValueError("Need encoder inversion function multiplicative -> additive for attention mask")
 
                 # invert attention mask
-                encoder_attention_mask = inv_encoder_attention_mask
+                encoder_attention_mask = self.inv_fn_encoder(encoder_attention_mask)
 
         cross_attention_outputs = self.crossattention(
             hidden_states=hidden_states,
@@ -362,18 +264,6 @@ class CrossAttentionLayer(nn.Module):
         )
         attention_output = cross_attention_outputs[0]
         outputs = cross_attention_outputs[1:]  # add cross attentions if we output attention weights
-
-        residual = self.linear_crossattention(
-            hidden_states=hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=inv_encoder_attention_mask,
-            output_attentions=output_attentions,
-        )
-        residual_output = residual[0]
-        outputs += residual[1:]
-
-        attention_output = self.dense(attention_output)
-        attention_output = self.layer_norm(attention_output + residual_output)
 
         # add cross-attn cache to positions 3,4 of present_key_value tuple
         layer_output = apply_chunking_to_forward(
@@ -428,8 +318,8 @@ class EnsembleEmbedding(torch.nn.Module):
                         mask_mode='add',
                         local_block_size=local_block_size,
                     )
-                elif attn_mode == 'linear_mem':
-                    attention = BertLinearMemAttention(
+                elif attn_mode == 'linear':
+                    attention = BertLinearAttention(
                         config=self.seq_model.config,
                         query_chunk_size=query_chunk_size_seq,
                         key_chunk_size=key_chunk_size_seq,
@@ -449,8 +339,8 @@ class EnsembleEmbedding(torch.nn.Module):
                         mask_mode='add',
                         local_block_size=local_block_size,
                     )
-                elif attn_mode == 'linear_mem':
-                    attention = BertLinearMemAttention(
+                elif attn_mode == 'linear':
+                    attention = BertLinearAttention(
                         config=smiles_config,
                         query_chunk_size=query_chunk_size_smiles,
                         key_chunk_size=key_chunk_size_smiles,
@@ -472,6 +362,7 @@ class EnsembleEmbedding(torch.nn.Module):
                 local_block_size=local_block_size,
                 query_chunk_size=query_chunk_size_seq,
                 key_chunk_size=key_chunk_size_smiles,
+                inv_fn=self.seq_model.invert_attention_mask,
                 inv_fn_encoder=self.smiles_model.invert_attention_mask,
             ) for _ in range(n_cross_attention_layers)])
         self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(
@@ -481,6 +372,7 @@ class EnsembleEmbedding(torch.nn.Module):
                 local_block_size=local_block_size,
                 query_chunk_size=query_chunk_size_smiles,
                 key_chunk_size=key_chunk_size_seq,
+                inv_fn=self.smiles_model.invert_attention_mask,
                 inv_fn_encoder=self.seq_model.invert_attention_mask,
             ) for _ in range(n_cross_attention_layers)])
 
@@ -552,7 +444,6 @@ class EnsembleEmbedding(torch.nn.Module):
                     attention_mask_2,
                 )
 
-        # mean pooling over sequence length
         cls_seq = self.seq_model.pooler(hidden_seq)
         cls_smiles = self.smiles_model.pooler(hidden_smiles)
         last_hidden_states = torch.cat([cls_seq, cls_smiles], dim=1)

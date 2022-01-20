@@ -180,7 +180,7 @@ class DataArguments:
 def main():
     # on-the-fly tokenization
     def encode(item):
-        seq_encodings = seq_tokenizer(expand_seqs(item['seq'])[0][:512],
+        seq_encodings = seq_tokenizer(expand_seqs(item['seq'])[0],
                                  is_split_into_words=True,
                                  return_offsets_mapping=False,
                                  truncation=True,

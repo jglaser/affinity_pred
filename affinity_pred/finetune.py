@@ -2,7 +2,7 @@ import torch
 import logging
 
 import transformers
-from transformers import BertModel, BertTokenizer, AutoTokenizer
+from transformers import BertModel, BertTokenizer, T5Tokenizer, AutoTokenizer
 from transformers import PreTrainedModel, BertConfig
 from transformers import Trainer, TrainingArguments
 from transformers.data.data_collator import default_data_collator
@@ -117,6 +117,10 @@ class ModelArguments:
         default=None
     )
 
+    seq_model_type: str = field(
+        default='bert'
+    )
+
     smiles_model_dir: str = field(
         default=None
     )
@@ -176,7 +180,7 @@ class DataArguments:
 def main():
     # on-the-fly tokenization
     def encode(item):
-        seq_encodings = seq_tokenizer(expand_seqs(item['seq'])[0],
+        seq_encodings = seq_tokenizer(expand_seqs(item['seq'])[0][:512],
                                  is_split_into_words=True,
                                  return_offsets_mapping=False,
                                  truncation=True,
@@ -225,14 +229,15 @@ def main():
     if model_args.model_type == 'regex':
         smiles_tokenizer.backend_tokenizer.pre_tokenizer = Sequence([WhitespaceSplit(),Split(Regex(r"""(\[[^\]]+]|Br?|Cl?|N|O|S|P|F|I|b|c|n|o|s|p|\(|\)|\.|=|#|-|\+|\\|\/|:|~|@|\?|>>?|\*|\$|\%[0-9]{2}|[0-9])"""), behavior='isolated')])
 
-    print('Tokenizer lower_case:', smiles_tokenizer.do_lower_case, flush=True)
-
-    # this logic is necessary because online-downloading and caching doesn't seem to work
-    if os.path.exists('seq_tokenizer'):
-        seq_tokenizer = BertTokenizer.from_pretrained('seq_tokenizer/', do_lower_case=False)
+    if model_args.seq_model_type == 'bert':
+        # this logic is necessary because online-downloading and caching doesn't seem to work
+        if os.path.exists('seq_tokenizer'):
+            seq_tokenizer = BertTokenizer.from_pretrained('seq_tokenizer/', do_lower_case=False)
+        else:
+            seq_tokenizer = BertTokenizer.from_pretrained(model_args.seq_model_name, do_lower_case=False)
+            seq_tokenizer.save_pretrained('seq_tokenizer/')
     else:
-        seq_tokenizer = BertTokenizer.from_pretrained(model_args.seq_model_name, do_lower_case=False)
-        seq_tokenizer.save_pretrained('seq_tokenizer/')
+        seq_tokenizer = T5Tokenizer.from_pretrained(model_args.seq_model_name, do_lower_case=False )
 
     max_seq_length = model_args.max_seq_length
     max_smiles_length = min(smiles_tokenizer.model_max_length, model_args.max_smiles_length)
@@ -304,6 +309,7 @@ def main():
     model = ProteinLigandAffinity(
         model_args.seq_model_name,
         smiles_model_directory,
+        seq_model_type=model_args.seq_model_type,
         n_cross_attention_layers=model_args.n_cross_attention,
         attn_mode=model_args.attn_mode,
         local_block_size=model_args.local_block_size,

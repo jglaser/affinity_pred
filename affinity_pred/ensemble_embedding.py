@@ -1,4 +1,4 @@
-from transformers import BertModel, BertConfig
+from transformers import BertModel, T5EncoderModel
 from transformers.models.bert.modeling_bert import BertAttention, BertIntermediate, BertOutput
 from transformers.modeling_utils import apply_chunking_to_forward
 
@@ -286,6 +286,7 @@ class EnsembleEmbedding(torch.nn.Module):
             self,
             seq_model_name,
             smiles_model_name,
+            seq_model_type='bert',
             n_cross_attention_layers=3,
             attn_mode='bert',
             local_block_size=512,
@@ -298,7 +299,23 @@ class EnsembleEmbedding(torch.nn.Module):
 
         self.gradient_checkpointing = False
 
-        self.seq_model = BertModel.from_pretrained(seq_model_name)
+        if not seq_model_type in ('bert', 't5'):
+            raise ValueError("Unsupported sequence model type")
+
+        self.seq_model_type = seq_model_type
+        if seq_model_type == 't5':
+            self.seq_model = T5EncoderModel.from_pretrained(seq_model_name)
+
+            # translate parameters to BERT style cross attention
+            self.seq_model.config.attention_probs_dropout_prob = 0
+            self.seq_model.config.hidden_dropout_prob = 0
+            self.seq_model.config.layer_norm_eps = 1e-4
+            self.seq_model.config.intermediate_size = self.seq_model.config.d_ff
+            self.seq_model.config.hidden_act = self.seq_model.config.feed_forward_proj
+            self.seq_model.config.num_attention_heads = self.seq_model.config.d_kv
+            self.seq_model.config.hidden_size = self.seq_model.config.d_model
+        else:
+            self.seq_model = BertModel.from_pretrained(seq_model_name)
 
         self.smiles_model = BertModel.from_pretrained(smiles_model_name)
 
@@ -444,7 +461,10 @@ class EnsembleEmbedding(torch.nn.Module):
                     attention_mask_2,
                 )
 
-        cls_seq = self.seq_model.pooler(hidden_seq)
+        if self.seq_model_type == 't5':
+            cls_seq = torch.mean(hidden_seq, 1)
+        else:
+            cls_seq = self.seq_model.pooler(hidden_seq)
         cls_smiles = self.smiles_model.pooler(hidden_smiles)
         last_hidden_states = torch.cat([cls_seq, cls_smiles], dim=1)
 

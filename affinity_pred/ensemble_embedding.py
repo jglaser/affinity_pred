@@ -278,6 +278,22 @@ class CrossAttentionLayer(nn.Module):
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
+class Pooler(nn.Module):
+    def __init__(self, hidden_size, dropout_prob = 0):
+        super().__init__()
+        self.dense = nn.Linear(hidden_size, hidden_size)
+        self.activation = nn.Tanh()
+        self.dropout = nn.Dropout(dropout_prob)
+
+    def forward(self, hidden_states):
+        # We "pool" the model by simply taking the hidden state corresponding
+        # to the first token.
+        first_token_tensor = hidden_states[:, 0]
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        pooled_output = self.dropout(pooled_output)
+        return pooled_output
+
 class EnsembleEmbedding(torch.nn.Module):
 
     supports_gradient_checkpointing = True
@@ -287,13 +303,14 @@ class EnsembleEmbedding(torch.nn.Module):
             seq_model_name,
             smiles_model_name,
             seq_model_type='bert',
-            n_cross_attention_layers=3,
+            n_attention=3,
             attn_mode='bert',
             local_block_size=512,
             query_chunk_size_seq=2048,
             key_chunk_size_seq=2048,
             query_chunk_size_smiles=512,
             key_chunk_size_smiles=512,
+            pooler_dropout_prob=0.1,
         ):
         super().__init__()
 
@@ -304,7 +321,10 @@ class EnsembleEmbedding(torch.nn.Module):
 
         self.seq_model_type = seq_model_type
         if seq_model_type == 't5':
-            self.seq_model = T5EncoderModel.from_pretrained(seq_model_name)
+            self.seq_model = T5EncoderModel.from_pretrained(
+                seq_model_name,
+                add_pooling_layer=False,
+            )
 
             # translate parameters to BERT style cross attention
             self.seq_model.config.attention_probs_dropout_prob = 0
@@ -315,13 +335,17 @@ class EnsembleEmbedding(torch.nn.Module):
             self.seq_model.config.num_attention_heads = self.seq_model.config.d_kv
             self.seq_model.config.hidden_size = self.seq_model.config.d_model
         else:
-            self.seq_model = BertModel.from_pretrained(seq_model_name)
+            self.seq_model = BertModel.from_pretrained(
+                seq_model_name,
+                add_pooling_layer=False,
+                )
 
-        self.smiles_model = BertModel.from_pretrained(smiles_model_name)
+        self.smiles_model = BertModel.from_pretrained(
+            smiles_model_name,
+            add_pooling_layer=False
+        )
 
         smiles_config = self.smiles_model.config
-
-        self.aggregate_hidden_size =self.seq_model.config.hidden_size+smiles_config.hidden_size
 
         if attn_mode != 'bert':
 
@@ -369,29 +393,27 @@ class EnsembleEmbedding(torch.nn.Module):
 
                 layer.attention.self = attention
 
-        # Cross-attention layers
-        self.n_cross_attention_layers = n_cross_attention_layers
-
-        self.cross_attention_seq = nn.ModuleList([CrossAttentionLayer(
+        # use the configuration of the model with the larger hidden dimensions
+        self.hidden_size = self.seq_model.config.hidden_size
+        self.attention = nn.ModuleList([BertAttention(
                 config=self.seq_model.config,
-                other_config=smiles_config,
-                attn_mode=attn_mode,
-                local_block_size=local_block_size,
-                query_chunk_size=query_chunk_size_seq,
-                key_chunk_size=key_chunk_size_smiles,
-                inv_fn=self.seq_model.invert_attention_mask,
-                inv_fn_encoder=self.smiles_model.invert_attention_mask,
-            ) for _ in range(n_cross_attention_layers)])
-        self.cross_attention_smiles = nn.ModuleList([CrossAttentionLayer(
-                config=smiles_config,
-                other_config=self.seq_model.config,
-                attn_mode=attn_mode,
-                local_block_size=local_block_size,
-                query_chunk_size=query_chunk_size_smiles,
-                key_chunk_size=key_chunk_size_seq,
-                inv_fn=self.smiles_model.invert_attention_mask,
-                inv_fn_encoder=self.seq_model.invert_attention_mask,
-            ) for _ in range(n_cross_attention_layers)])
+            ) for _ in range(n_attention)])
+
+        # translation layers to embed the individual hidden spaces into the combined one
+        self.linear_smiles = torch.nn.Linear(
+            self.smiles_model.config.hidden_size,
+            self.hidden_size,
+        )
+
+        self.linear_seq = torch.nn.Linear(
+            self.seq_model.config.hidden_size,
+            self.hidden_size,
+        )
+
+        self.pooler = Pooler(
+            self.hidden_size,
+            dropout_prob = pooler_dropout_prob
+        )
 
     def gradient_checkpointing_enable(self):
         self.gradient_checkpointing = True
@@ -427,48 +449,36 @@ class EnsembleEmbedding(torch.nn.Module):
         )
         hidden_smiles = encoder_outputs.last_hidden_state
 
-        def cross(attn_1, attn_2, hidden_1, hidden_2, attention_mask_1, attention_mask_2):
-            attention_output_1 = attn_1(
-                hidden_1,
-                hidden_2,
-                attention_mask_2,
-            )
-            attention_output_2 = attn_2(
-                hidden_2,
-                hidden_1,
-                attention_mask_1,
-            )
-            return attention_output_1[0], attention_output_2[0]
+        # embed individual outputs
+        hidden_seq = self.linear_seq(hidden_seq)
+        hidden_smiles = self.linear_smiles(hidden_smiles)
 
-        for i in range(self.n_cross_attention_layers):
+        # concatenate the inputs
+
+        # put the BERT model first, because it has a [CLS] token
+        hidden_states = torch.cat([hidden_smiles, hidden_seq], dim=1)
+        attention_mask = torch.cat([attention_mask_2, attention_mask_1], dim=1)
+
+        # BERT layers use an additive attention mask
+        attention_mask = self.seq_model.invert_attention_mask(attention_mask)
+
+        for attn in self.attention:
             if self.gradient_checkpointing:
-                hidden_seq, hidden_smiles = checkpoint.checkpoint(
-                    cross,
-                    self.cross_attention_seq[i],
-                    self.cross_attention_smiles[i],
-                    hidden_seq,
-                    hidden_smiles,
-                    attention_mask_1,
-                    attention_mask_2,
+                attn_output = checkpoint.checkpoint(
+                    attn,
+                    hidden_states,
+                    attention_mask,
                 )
             else:
-                hidden_seq, hidden_smiles = cross(
-                    self.cross_attention_seq[i],
-                    self.cross_attention_smiles[i],
-                    hidden_seq,
-                    hidden_smiles,
-                    attention_mask_1,
-                    attention_mask_2,
+                attn_output = attn(
+                    hidden_states,
+                    attention_mask,
                 )
+            hidden_states = attn_output[0]
 
-        if self.seq_model_type == 't5':
-            cls_seq = torch.mean(hidden_seq, 1)
-        else:
-            cls_seq = self.seq_model.pooler(hidden_seq)
-        cls_smiles = self.smiles_model.pooler(hidden_smiles)
-        last_hidden_states = torch.cat([cls_seq, cls_smiles], dim=1)
+        pooled_hidden_states = self.pooler(hidden_states)
 
-        return last_hidden_states
+        return pooled_hidden_states
 
 class ProteinLigandAffinity(EnsembleEmbedding):
     def __init__(self,
@@ -481,7 +491,7 @@ class ProteinLigandAffinity(EnsembleEmbedding):
             smiles_model_name,
             **kwargs)
 
-        self.linear = torch.nn.Linear(self.aggregate_hidden_size, 1)
+        self.linear = torch.nn.Linear(self.hidden_size, 1)
 
     def forward(
             self,

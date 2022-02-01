@@ -310,7 +310,7 @@ def main():
         model_args.seq_model_name,
         smiles_model_directory,
         seq_model_type=model_args.seq_model_type,
-        n_cross_attention_layers=model_args.n_cross_attention,
+        n_attention=model_args.n_cross_attention,
         attn_mode=model_args.attn_mode,
         local_block_size=model_args.local_block_size,
         query_chunk_size_seq=model_args.attn_query_chunk_size_seq,

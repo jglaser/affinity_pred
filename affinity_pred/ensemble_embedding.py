@@ -311,6 +311,8 @@ class EnsembleEmbedding(torch.nn.Module):
             query_chunk_size_smiles=512,
             key_chunk_size_smiles=512,
             pooler_dropout_prob=0.1,
+            hidden_dropout_prob=0.1,
+            attention_probs_dropout_prob=0.1,
         ):
         super().__init__()
 
@@ -395,8 +397,11 @@ class EnsembleEmbedding(torch.nn.Module):
 
         # use the configuration of the model with the larger hidden dimensions
         self.hidden_size = self.seq_model.config.hidden_size
+        config = self.seq_model.config
+        config.hidden_dropout_prob = hidden_dropout_prob
+        config.attention_probs_dropout_prob = attention_probs_dropout_prob
         self.attention = nn.ModuleList([BertAttention(
-                config=self.seq_model.config,
+                config=config,
             ) for _ in range(n_attention)])
 
         # translation layers to embed the individual hidden spaces into the combined one

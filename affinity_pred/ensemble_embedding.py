@@ -310,9 +310,9 @@ class EnsembleEmbedding(torch.nn.Module):
             key_chunk_size_seq=2048,
             query_chunk_size_smiles=512,
             key_chunk_size_smiles=512,
-            pooler_dropout_prob=0.1,
-            hidden_dropout_prob=0.1,
-            attention_probs_dropout_prob=0.1,
+            pooler_dropout_prob=0,
+            hidden_dropout_prob=0,
+            attention_probs_dropout_prob=0,
         ):
         super().__init__()
 
@@ -342,10 +342,15 @@ class EnsembleEmbedding(torch.nn.Module):
                 add_pooling_layer=False,
                 )
 
+            self.seq_model.config.hidden_dropout_prob = hidden_dropout_prob
+            self.seq_model.config.attention_probs_dropout_prob = attention_probs_dropout_prob
+
         self.smiles_model = BertModel.from_pretrained(
             smiles_model_name,
             add_pooling_layer=False
         )
+        self.smiles_model.config.hidden_dropout_prob = hidden_dropout_prob
+        self.smiles_model.config.attention_probs_dropout_prob = attention_probs_dropout_prob
 
         smiles_config = self.smiles_model.config
 

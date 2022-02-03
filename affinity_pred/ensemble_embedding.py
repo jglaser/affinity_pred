@@ -9,6 +9,8 @@ from torch import Tensor
 
 from torch.utils import checkpoint
 
+import copy
+
 # wrapper class for HAttention1D
 class BertHAttention1D(nn.Module):
     def __init__(
@@ -278,22 +280,6 @@ class CrossAttentionLayer(nn.Module):
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
 
-class Pooler(nn.Module):
-    def __init__(self, hidden_size, dropout_prob = 0):
-        super().__init__()
-        self.dense = nn.Linear(hidden_size, hidden_size)
-        self.activation = nn.Tanh()
-        self.dropout = nn.Dropout(dropout_prob)
-
-    def forward(self, hidden_states):
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token.
-        first_token_tensor = hidden_states[:, 0]
-        pooled_output = self.dense(first_token_tensor)
-        pooled_output = self.activation(pooled_output)
-        pooled_output = self.dropout(pooled_output)
-        return pooled_output
-
 class EnsembleEmbedding(torch.nn.Module):
 
     supports_gradient_checkpointing = True
@@ -303,7 +289,7 @@ class EnsembleEmbedding(torch.nn.Module):
             seq_model_name,
             smiles_model_name,
             seq_model_type='bert',
-            n_attention=3,
+            n_layers=3,
             attn_mode='bert',
             local_block_size=512,
             query_chunk_size_seq=2048,
@@ -402,14 +388,17 @@ class EnsembleEmbedding(torch.nn.Module):
 
         # use the configuration of the model with the larger hidden dimensions
         self.hidden_size = self.seq_model.config.hidden_size
-        config = self.seq_model.config
+        config = copy.deepcopy(self.seq_model.config)
         config.hidden_dropout_prob = hidden_dropout_prob
         config.attention_probs_dropout_prob = attention_probs_dropout_prob
-        self.attention = nn.ModuleList([BertAttention(
-                config=config,
-            ) for _ in range(n_attention)])
+        config.num_hidden_layers = n_layers
 
-        # translation layers to embed the individual hidden spaces into the combined one
+        self.bert = BertModel(config, add_pooling_layer = True)
+
+        # don't need those since we're passing embededings directly into the model
+        self.bert.embeddings.word_embeddings = None
+
+        # linear transformations to embed the individual hidden vector spaces into the common one
         self.linear_smiles = torch.nn.Linear(
             self.smiles_model.config.hidden_size,
             self.hidden_size,
@@ -420,20 +409,17 @@ class EnsembleEmbedding(torch.nn.Module):
             self.hidden_size,
         )
 
-        self.pooler = Pooler(
-            self.hidden_size,
-            dropout_prob = pooler_dropout_prob
-        )
-
     def gradient_checkpointing_enable(self):
         self.gradient_checkpointing = True
         self.seq_model.gradient_checkpointing_enable()
         self.smiles_model.gradient_checkpointing_enable()
+        self.bert.gradient_checkpointing_enable()
 
     def gradient_checkpointing_disable(self):
         self.gradient_checkpointing = False
         self.seq_model.gradient_checkpointing_disable()
         self.smiles_model.gradient_checkpointing_disable()
+        self.bert.gradient_checkpointing_disable()
 
     def forward(
             self,
@@ -465,30 +451,16 @@ class EnsembleEmbedding(torch.nn.Module):
 
         # concatenate the inputs
 
-        # put the BERT model first, because it has a [CLS] token
+        # put the ligand (BERT) model first, because it has a [CLS] token
         hidden_states = torch.cat([hidden_smiles, hidden_seq], dim=1)
         attention_mask = torch.cat([attention_mask_2, attention_mask_1], dim=1)
 
-        # BERT layers use an additive attention mask
-        attention_mask = self.seq_model.invert_attention_mask(attention_mask)
+        bert_output = self.bert(
+            inputs_embeds=hidden_states,
+            attention_mask=attention_mask
+        )
 
-        for attn in self.attention:
-            if self.gradient_checkpointing:
-                attn_output = checkpoint.checkpoint(
-                    attn,
-                    hidden_states,
-                    attention_mask,
-                )
-            else:
-                attn_output = attn(
-                    hidden_states,
-                    attention_mask,
-                )
-            hidden_states = attn_output[0]
-
-        pooled_hidden_states = self.pooler(hidden_states)
-
-        return pooled_hidden_states
+        return bert_output.pooler_output
 
 class ProteinLigandAffinity(EnsembleEmbedding):
     def __init__(self,

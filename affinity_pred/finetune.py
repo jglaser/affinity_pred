@@ -217,7 +217,7 @@ def main():
         # now set the local task id to 0 to enable DDP
         training_args.local_rank = 0
 
-    # error out if there are parameters for which gradients are not computed (useful for debugging)
+    # error out when there are unused parameters
     training_args.ddp_find_unused_parameters=False
 
     smiles_tokenizer_directory = model_args.smiles_tokenizer_dir
@@ -310,7 +310,7 @@ def main():
         model_args.seq_model_name,
         smiles_model_directory,
         seq_model_type=model_args.seq_model_type,
-        n_attention=model_args.n_cross_attention,
+        n_layers=model_args.n_cross_attention,
         attn_mode=model_args.attn_mode,
         local_block_size=model_args.local_block_size,
         query_chunk_size_seq=model_args.attn_query_chunk_size_seq,

@@ -309,7 +309,7 @@ class EnsembleEmbedding(torch.nn.Module):
         if seq_model_type == 't5':
             self.seq_model = T5EncoderModel.from_pretrained(
                 seq_model_name,
-                add_pooling_layer=False,
+                is_encoder_decoder=False,
             )
 
             # translate parameters to BERT style cross attention
@@ -320,6 +320,9 @@ class EnsembleEmbedding(torch.nn.Module):
             self.seq_model.config.hidden_act = self.seq_model.config.feed_forward_proj
             self.seq_model.config.num_attention_heads = self.seq_model.config.d_kv
             self.seq_model.config.hidden_size = self.seq_model.config.d_model
+            self.seq_model.config.max_position_embeddings = 10000
+            self.seq_model.config.type_vocab_size = 1
+            self.seq_model.config.initializer_range = 0.02
         else:
             self.seq_model = BertModel.from_pretrained(
                 seq_model_name,
@@ -339,29 +342,29 @@ class EnsembleEmbedding(torch.nn.Module):
         smiles_config = self.smiles_model.config
 
         if attn_mode != 'bert':
+            if seq_model_type == 'bert':
+                # swap the self-attention layers
+                seq_layers = self.seq_model.encoder.layer
 
-            # swap the self-attention layers
-            seq_layers = self.seq_model.encoder.layer
+                for layer in seq_layers:
+                    if attn_mode == 'hierarchical':
+                        attention = BertHAttention1D(
+                            config=self.seq_model.config,
+                            mask_mode='add',
+                            local_block_size=local_block_size,
+                        )
+                    elif attn_mode == 'linear':
+                        attention = BertLinearAttention(
+                            config=self.seq_model.config,
+                            query_chunk_size=query_chunk_size,
+                            key_chunk_size=key_chunk_size,
+                        )
 
-            for layer in seq_layers:
-                if attn_mode == 'hierarchical':
-                    attention = BertHAttention1D(
-                        config=self.seq_model.config,
-                        mask_mode='add',
-                        local_block_size=local_block_size,
-                    )
-                elif attn_mode == 'linear':
-                    attention = BertLinearAttention(
-                        config=self.seq_model.config,
-                        query_chunk_size=query_chunk_size,
-                        key_chunk_size=key_chunk_size,
-                    )
+                    attention.query = layer.attention.self.query
+                    attention.key = layer.attention.self.key
+                    attention.value = layer.attention.self.value
 
-                attention.query = layer.attention.self.query
-                attention.key = layer.attention.self.key
-                attention.value = layer.attention.self.value
-
-                layer.attention.self = attention
+                    layer.attention.self = attention
 
             smiles_layers = self.smiles_model.encoder.layer
             for layer in smiles_layers:

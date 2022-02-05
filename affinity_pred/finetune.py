@@ -138,7 +138,7 @@ class ModelArguments:
     )
 
     max_smiles_length: int = field(
-        default=200
+        default=512
     )
 
     attn_mode: str = field(
@@ -149,20 +149,12 @@ class ModelArguments:
         default=512,
     )
 
-    attn_query_chunk_size_seq: int = field(
-        default=2048,
-    )
-
-    attn_key_chunk_size_seq: int = field(
-        default=2048,
-    )
-
-    attn_query_chunk_size_smiles: int = field(
+    attn_query_chunk_size: int = field(
         default=512,
     )
 
-    attn_key_chunk_size_smiles: int = field(
-        default=512
+    attn_key_chunk_size: int = field(
+        default=512,
     )
 
 
@@ -313,10 +305,8 @@ def main():
         n_layers=model_args.n_cross_attention,
         attn_mode=model_args.attn_mode,
         local_block_size=model_args.local_block_size,
-        query_chunk_size_seq=model_args.attn_query_chunk_size_seq,
-        query_chunk_size_smiles=model_args.attn_query_chunk_size_smiles,
-        key_chunk_size_seq=model_args.attn_key_chunk_size_seq,
-        key_chunk_size_smiles=model_args.attn_key_chunk_size_smiles,
+        query_chunk_size=model_args.attn_query_chunk_size,
+        key_chunk_size=model_args.attn_key_chunk_size,
     )
 
     trainer = Trainer(

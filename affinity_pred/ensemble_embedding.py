@@ -292,10 +292,8 @@ class EnsembleEmbedding(torch.nn.Module):
             n_layers=3,
             attn_mode='bert',
             local_block_size=512,
-            query_chunk_size_seq=2048,
-            key_chunk_size_seq=2048,
-            query_chunk_size_smiles=512,
-            key_chunk_size_smiles=512,
+            query_chunk_size=2048,
+            key_chunk_size=512,
             pooler_dropout_prob=0,
             hidden_dropout_prob=0,
             attention_probs_dropout_prob=0,
@@ -355,8 +353,8 @@ class EnsembleEmbedding(torch.nn.Module):
                 elif attn_mode == 'linear':
                     attention = BertLinearAttention(
                         config=self.seq_model.config,
-                        query_chunk_size=query_chunk_size_seq,
-                        key_chunk_size=key_chunk_size_seq,
+                        query_chunk_size=query_chunk_size,
+                        key_chunk_size=key_chunk_size,
                     )
 
                 attention.query = layer.attention.self.query
@@ -376,8 +374,8 @@ class EnsembleEmbedding(torch.nn.Module):
                 elif attn_mode == 'linear':
                     attention = BertLinearAttention(
                         config=smiles_config,
-                        query_chunk_size=query_chunk_size_smiles,
-                        key_chunk_size=key_chunk_size_smiles,
+                        query_chunk_size=query_chunk_size,
+                        key_chunk_size=key_chunk_size,
                     )
 
                 attention.query = layer.attention.self.query
@@ -394,6 +392,30 @@ class EnsembleEmbedding(torch.nn.Module):
         config.num_hidden_layers = n_layers
 
         self.bert = BertModel(config, add_pooling_layer = True)
+
+        if attn_mode != 'bert':
+            # swap the self-attention layers
+            layers = self.bert.encoder.layer
+
+            for layer in layers:
+                if attn_mode == 'hierarchical':
+                    attention = BertHAttention1D(
+                        config=config,
+                        mask_mode='add',
+                        local_block_size=local_block_size,
+                    )
+                elif attn_mode == 'linear':
+                    attention = BertLinearAttention(
+                        config=config,
+                        query_chunk_size=query_chunk_size,
+                        key_chunk_size=key_chunk_size,
+                    )
+
+                attention.query = layer.attention.self.query
+                attention.key = layer.attention.self.key
+                attention.value = layer.attention.self.value
+
+                layer.attention.self = attention
 
         # don't need those since we're passing embededings directly into the model
         self.bert.embeddings.word_embeddings = None

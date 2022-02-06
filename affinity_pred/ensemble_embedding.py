@@ -327,17 +327,16 @@ class EnsembleEmbedding(torch.nn.Module):
             self.seq_model = BertModel.from_pretrained(
                 seq_model_name,
                 add_pooling_layer=False,
+                hidden_dropout_prob = hidden_dropout_prob,
+                attention_probs_dropout_prob = attention_probs_dropout_prob,
                 )
-
-            self.seq_model.config.hidden_dropout_prob = hidden_dropout_prob
-            self.seq_model.config.attention_probs_dropout_prob = attention_probs_dropout_prob
 
         self.smiles_model = BertModel.from_pretrained(
             smiles_model_name,
-            add_pooling_layer=False
+            add_pooling_layer=False,
+            hidden_dropout_prob = hidden_dropout_prob,
+            attention_probs_dropout_prob = attention_probs_dropout_prob,
         )
-        self.smiles_model.config.hidden_dropout_prob = hidden_dropout_prob
-        self.smiles_model.config.attention_probs_dropout_prob = attention_probs_dropout_prob
 
         smiles_config = self.smiles_model.config
 

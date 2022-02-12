@@ -244,6 +244,6 @@ class EnsembleSequenceRegressor(torch.nn.Module):
 
         if labels is not None:
             loss = gaussian_nll_loss(mu, labels.view(-1,1).half(), var)
-            return (loss, logits)
+            return (loss, logits.unsqueee(1))
         else:
-            return logits
+            return logits.unsqueeze(1)

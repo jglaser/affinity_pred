@@ -448,8 +448,10 @@ class EnsembleEmbedding(torch.nn.Module):
     def forward(
             self,
             input_ids_1=None,
+            inputs_embeds_1=None,
             attention_mask_1=None,
             input_ids_2=None,
+            inputs_embeds_2=None,
             attention_mask_2=None,
             output_attentions=False,
     ):
@@ -458,6 +460,7 @@ class EnsembleEmbedding(torch.nn.Module):
         # embed amino acids, sharing the same model
         encoder_outputs = self.seq_model(
             input_ids=input_ids_1,
+            inputs_embeds=inputs_embeds_1,
             attention_mask=attention_mask_1,
         )
         hidden_seq = encoder_outputs.last_hidden_state
@@ -465,6 +468,7 @@ class EnsembleEmbedding(torch.nn.Module):
         # encode SMILES
         encoder_outputs = self.smiles_model(
             input_ids=input_ids_2,
+            inputs_embeds=inputs_embeds_2,
             attention_mask=attention_mask_2,
         )
         hidden_smiles = encoder_outputs.last_hidden_state
@@ -502,16 +506,20 @@ class ProteinLigandAffinity(EnsembleEmbedding):
     def forward(
             self,
             input_ids_1=None,
+            inputs_embeds_1=None,
             attention_mask_1=None,
             input_ids_2=None,
+            inputs_embeds_2=None,
             attention_mask_2=None,
             labels=None,
             output_attentions=False,
     ):
         embedding = super().forward(
             input_ids_1=input_ids_1,
+            inputs_embeds_1=inputs_embeds_1,
             attention_mask_1=attention_mask_1,
             input_ids_2=input_ids_2,
+            inputs_embeds_2=inputs_embeds_2,
             attention_mask_2=attention_mask_2,
             output_attentions=output_attentions
         )

@@ -1,91 +1,97 @@
 import warnings
 from typing import Dict, List, Optional, Tuple, Union
 import torch
-from captum.attr import LayerIntegratedGradients
+from path_explain.explainers.embedding_explainer_torch import EmbeddingExplainerTorch
 
-from model import EnsembleSequenceRegressor
+from ensemble_embedding import ProteinLigandAffinity
 
 import numpy as np
 
 class EnsembleExplainer(object):
     def __init__(
         self,
-        model: EnsembleSequenceRegressor,
-        seq_tokenizer,
-        smiles_tokenizer,
-        internal_batch_size=None
+        model: ProteinLigandAffinity,
     ):
         """
         Args:
-            model (EnsembleSequenceRegressor): Pretrained ensemble regressor
+            model (ProteinLigandAffinity): Pretrained ensemble regressor
         Raises:
             AttributionTypeNotSupportedError:
         """
-        self.seq_attributions = None
-        self.smiles_attributions = None
 
         self.model = model
 
-        self.seq_tokenizer = seq_tokenizer
-        self.smiles_tokenizer = smiles_tokenizer
-        self.internal_batch_size = internal_batch_size
-
-    def _calculate_attributions(  # type: ignore
+    def __call__(  # type: ignore
         self,
-        input_ids,
-        attention_mask,
+        input_ids_1,
+        attention_mask_1,
+        input_ids_2,
+        attention_mask_2,
+        batch_size=1,
+        interaction_index=None,
+        use_expectation=False,
+        return_attributions=True,
+        return_interactions=True,
         **kwargs
     ):
 
-        ref_input_ids = np.array(input_ids.cpu().numpy())
-        ref_input_ids[:,0:self.model.max_seq_length] = [
-            [self.seq_tokenizer.pad_token_id
-                if token != self.seq_tokenizer.cls_token_id and token != self.seq_tokenizer.sep_token_id
-                else token for token in seq[:self.model.max_seq_length] 
-            ] for seq in input_ids.cpu().numpy()]
+        seq_len = input_ids_1.shape[1]
 
-        ref_input_ids[:,self.model.max_seq_length:] = [
-            [self.smiles_tokenizer.pad_token_id
-                if token != self.smiles_tokenizer.cls_token_id and token != self.smiles_tokenizer.sep_token_id
-                else token for token in seq[self.model.max_seq_length:] 
-            ] for seq in input_ids.cpu().numpy()]
+        ref_input_ids_1 = torch.zeros_like(input_ids_1)
+        ref_input_ids_2 = torch.zeros_like(input_ids_2)
 
-        ref_input_ids = torch.tensor(ref_input_ids)
-        ref_input_ids = ref_input_ids.to(input_ids.device)
+        def embedding_model(input_ids_1, input_ids_2):
+            embeddings_1 = self.model.seq_model.embeddings(input_ids_1)
+            embeddings_2 = self.model.smiles_model.embeddings(input_ids_2)
 
-        lig = LayerIntegratedGradients(self.model.forward,
-            [self.model.seq_model.get_input_embeddings(), self.model.smiles_model.get_input_embeddings()]
-        )
+            # pad the smaller embedding
+            pad_len = embeddings_1.shape[2] - embeddings_2.shape[2]
+            embeddings_2 = torch.nn.functional.pad(embeddings_2, (0, pad_len))
 
-        (seq_attributions, smiles_attributions), self.delta = lig.attribute(
-                    inputs=input_ids,
-                    baselines=ref_input_ids,
-                    return_convergence_delta=True,
-                    additional_forward_args=attention_mask,
-                    internal_batch_size=self.internal_batch_size,
-                    **kwargs
-                )
-        self.seq_attributions = seq_attributions.sum(dim=-1).squeeze(0)
-        self.seq_attributions = self.seq_attributions / torch.norm(self.seq_attributions)
-        self.smiles_attributions = smiles_attributions.sum(dim=-1).squeeze(0)
-        self.smiles_attributions = self.smiles_attributions / torch.norm(self.smiles_attributions)
+            embeddings = torch.cat([embeddings_1, embeddings_2], 1)
+            embeddings = embeddings.detach().clone()
+            return embeddings
 
-    def __call__(
-        self,
-        input_ids,
-        attention_mask,
-        **kwargs
-    ):
-        """
-        Calculates attribution for `input_ids` using the model.
-        This explainer also allows for attributions with respect to a particlar embedding type.
-        Returns:
-            tuple: (List of associated attribution scores for protein sequence, and for SMILES)
-        """
+        def prediction_model(inputs_embeds):
+            inputs_embeds_1 = inputs_embeds[:,:seq_len]
+            inputs_embeds_2 = inputs_embeds[:,seq_len:,
+                :self.model.smiles_model.config.hidden_size]
+            return self.model(
+                inputs_embeds_1=inputs_embeds_1,
+                inputs_embeds_2=inputs_embeds_2,
+                attention_mask_1=attention_mask_1,
+                attention_mask_2=attention_mask_2,
+            )
 
-        self._calculate_attributions(
-            input_ids,
-            attention_mask,
-            **kwargs
-        )
-        return self.seq_attributions.cpu().numpy(), self.smiles_attributions.cpu().numpy()
+        batch_embedding = embedding_model(input_ids_1, input_ids_2)
+        batch_embedding.requires_grad = True
+        baseline_embedding = embedding_model(ref_input_ids_1, ref_input_ids_2)
+
+        explainer = EmbeddingExplainerTorch(prediction_model)
+
+        result = ()
+        if return_attributions:
+            attributions = explainer.attributions(
+                        inputs=batch_embedding,
+                        baseline=baseline_embedding,
+                        use_expectation=use_expectation,
+                        batch_size=batch_size,
+                        **kwargs
+            )
+            result = (attributions, )
+
+        if return_interactions:
+            interactions = explainer.interactions(
+                        inputs=batch_embedding,
+                        baseline=baseline_embedding,
+                        use_expectation=use_expectation,
+                        interaction_index=interaction_index,
+                        batch_size=batch_size,
+                        **kwargs
+            )
+            result += (interactions, )
+
+        if len(result) == 1:
+            result = result[0]
+
+        return result

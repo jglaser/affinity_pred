@@ -326,14 +326,14 @@ class EnsembleEmbedding(torch.nn.Module):
         else:
             self.seq_model = BertModel.from_pretrained(
                 seq_model_name,
-                add_pooling_layer=False,
+                add_pooling_layer=True,
                 hidden_dropout_prob = hidden_dropout_prob,
                 attention_probs_dropout_prob = attention_probs_dropout_prob,
                 )
 
         self.smiles_model = BertModel.from_pretrained(
             smiles_model_name,
-            add_pooling_layer=False,
+            add_pooling_layer=True,
             hidden_dropout_prob = hidden_dropout_prob,
             attention_probs_dropout_prob = attention_probs_dropout_prob,
         )
@@ -387,63 +387,17 @@ class EnsembleEmbedding(torch.nn.Module):
                 layer.attention.self = attention
 
         # use the configuration of the model with the larger hidden dimensions
-        self.hidden_size = self.seq_model.config.hidden_size
-        config = copy.deepcopy(self.seq_model.config)
-        config.hidden_dropout_prob = hidden_dropout_prob
-        config.attention_probs_dropout_prob = attention_probs_dropout_prob
-        config.num_hidden_layers = n_layers
-
-        self.bert = BertModel(config, add_pooling_layer = True)
-
-        if attn_mode != 'bert':
-            # swap the self-attention layers
-            layers = self.bert.encoder.layer
-
-            for layer in layers:
-                if attn_mode == 'hierarchical':
-                    attention = BertHAttention1D(
-                        config=config,
-                        mask_mode='add',
-                        local_block_size=local_block_size,
-                    )
-                elif attn_mode == 'linear':
-                    attention = BertLinearAttention(
-                        config=config,
-                        query_chunk_size=query_chunk_size,
-                        key_chunk_size=key_chunk_size,
-                    )
-
-                attention.query = layer.attention.self.query
-                attention.key = layer.attention.self.key
-                attention.value = layer.attention.self.value
-
-                layer.attention.self = attention
-
-        # don't need those since we're passing embededings directly into the model
-        self.bert.embeddings.word_embeddings = None
-
-        # linear transformations to embed the individual hidden vector spaces into the common one
-        self.linear_smiles = torch.nn.Linear(
-            self.smiles_model.config.hidden_size,
-            self.hidden_size,
-        )
-
-        self.linear_seq = torch.nn.Linear(
-            self.seq_model.config.hidden_size,
-            self.hidden_size,
-        )
+        self.hidden_size = self.seq_model.config.hidden_size + self.smiles_model.config.hidden_size
 
     def gradient_checkpointing_enable(self):
         self.gradient_checkpointing = True
         self.seq_model.gradient_checkpointing_enable()
         self.smiles_model.gradient_checkpointing_enable()
-        self.bert.gradient_checkpointing_enable()
 
     def gradient_checkpointing_disable(self):
         self.gradient_checkpointing = False
         self.seq_model.gradient_checkpointing_disable()
         self.smiles_model.gradient_checkpointing_disable()
-        self.bert.gradient_checkpointing_disable()
 
     def forward(
             self,
@@ -463,7 +417,7 @@ class EnsembleEmbedding(torch.nn.Module):
             inputs_embeds=inputs_embeds_1,
             attention_mask=attention_mask_1,
         )
-        hidden_seq = encoder_outputs.last_hidden_state
+        pooled_seq = encoder_outputs.pooler_output
 
         # encode SMILES
         encoder_outputs = self.smiles_model(
@@ -471,24 +425,32 @@ class EnsembleEmbedding(torch.nn.Module):
             inputs_embeds=inputs_embeds_2,
             attention_mask=attention_mask_2,
         )
-        hidden_smiles = encoder_outputs.last_hidden_state
+        pooled_smiles = encoder_outputs.pooler_output
 
-        # embed individual outputs
-        hidden_seq = self.linear_seq(hidden_seq)
-        hidden_smiles = self.linear_smiles(hidden_smiles)
+        # concatenate the outputs
+        return torch.cat([pooled_seq, pooled_smiles], dim=1)
 
-        # concatenate the inputs
-
-        # put the ligand (BERT) model first, because it has a [CLS] token
-        hidden_states = torch.cat([hidden_smiles, hidden_seq], dim=1)
-        attention_mask = torch.cat([attention_mask_2, attention_mask_1], dim=1)
-
-        bert_output = self.bert(
-            inputs_embeds=hidden_states,
-            attention_mask=attention_mask
+class MLP(torch.nn.Module):
+    '''
+    Multilayer Perceptron.
+    '''
+    def __init__(self,ninput):
+        super().__init__()
+        nhidden = 1000
+        self.layers = torch.nn.Sequential(
+               torch.nn.Linear(ninput, nhidden),
+               torch.nn.GELU(),
+               torch.nn.Linear(nhidden, nhidden),
+               torch.nn.GELU(),
+               torch.nn.Linear(nhidden, nhidden),
+               torch.nn.GELU(),
+               torch.nn.Linear(nhidden, 1)
+#        torch.nn.Linear(ninput, 1)
         )
 
-        return bert_output.pooler_output
+    def forward(self, x):
+        '''Forward pass'''
+        return self.layers(x)
 
 class ProteinLigandAffinity(EnsembleEmbedding):
     def __init__(self,
@@ -501,7 +463,7 @@ class ProteinLigandAffinity(EnsembleEmbedding):
             smiles_model_name,
             **kwargs)
 
-        self.linear = torch.nn.Linear(self.hidden_size, 1)
+        self.cls = MLP(self.hidden_size)
 
     def forward(
             self,
@@ -524,7 +486,7 @@ class ProteinLigandAffinity(EnsembleEmbedding):
             output_attentions=output_attentions
         )
 
-        logits = self.linear(embedding)
+        logits = self.cls(embedding)
 
         # convert to float32 at the end to work around bug with MPI backend
         logits = logits.type(torch.float32)

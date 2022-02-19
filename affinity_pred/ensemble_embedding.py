@@ -1,15 +1,45 @@
-from transformers import BertModel, T5EncoderModel
+from transformers import BertModel, BertConfig
+from transformers import PreTrainedModel, PretrainedConfig
 from transformers.models.bert.modeling_bert import BertAttention, BertIntermediate, BertOutput
 from transformers.modeling_utils import apply_chunking_to_forward
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from torch import Tensor
 
-from torch.utils import checkpoint
+class ProteinLigandConfig(PretrainedConfig):
+    model_type = 'bert' # this is required for tokenizer selection
 
-import copy
+    def __init__(
+        self,
+        seq_config=BertConfig(),
+        smiles_config=BertConfig(),
+        seq_model_type = 'bert',
+        n_layers=3,
+        n_hidden_mlp=1000,
+        attn_mode='bert',
+        local_block_size=512,
+        query_chunk_size=2048,
+        key_chunk_size=512,
+        **kwargs
+    ):
+
+        self.smiles_config = smiles_config
+        if isinstance(smiles_config, BertConfig):
+            self.smiles_config = self.smiles_config.to_dict()
+
+        self.seq_config = seq_config
+        if isinstance(seq_config, BertConfig):
+            self.seq_config = self.seq_config.to_dict()
+
+        self.seq_model_type = seq_model_type
+        self.n_layers = n_layers
+        self.n_hidden_mlp = n_hidden_mlp
+        self.attn_mode = attn_mode
+        self.local_block_size = local_block_size
+        self.query_chunk_size = query_chunk_size
+        self.key_chunk_size = key_chunk_size
+        super().__init__(**kwargs)
 
 # wrapper class for HAttention1D
 class BertHAttention1D(nn.Module):
@@ -284,79 +314,41 @@ class EnsembleEmbedding(torch.nn.Module):
 
     supports_gradient_checkpointing = True
 
-    def __init__(
-            self,
-            seq_model_name,
-            smiles_model_name,
-            seq_model_type='bert',
-            n_layers=3,
-            attn_mode='bert',
-            local_block_size=512,
-            query_chunk_size=2048,
-            key_chunk_size=512,
-            pooler_dropout_prob=0,
-            hidden_dropout_prob=0,
-            attention_probs_dropout_prob=0,
-        ):
+    def __init__(self, config):
         super().__init__()
 
         self.gradient_checkpointing = False
 
-        if not seq_model_type in ('bert', 't5'):
+        if not config.seq_model_type in ('bert'):
             raise ValueError("Unsupported sequence model type")
 
-        self.seq_model_type = seq_model_type
-        if seq_model_type == 't5':
-            self.seq_model = T5EncoderModel.from_pretrained(
-                seq_model_name,
-                is_encoder_decoder=False,
+        self.seq_model = BertModel(
+            BertConfig.from_dict(config.seq_config),
+            add_pooling_layer=True,
             )
 
-            # translate parameters to BERT style cross attention
-            self.seq_model.config.attention_probs_dropout_prob = 0
-            self.seq_model.config.hidden_dropout_prob = 0
-            self.seq_model.config.layer_norm_eps = 1e-4
-            self.seq_model.config.intermediate_size = self.seq_model.config.d_ff
-            self.seq_model.config.hidden_act = self.seq_model.config.feed_forward_proj
-            self.seq_model.config.num_attention_heads = self.seq_model.config.d_kv
-            self.seq_model.config.hidden_size = self.seq_model.config.d_model
-            self.seq_model.config.max_position_embeddings = 10000
-            self.seq_model.config.type_vocab_size = 1
-            self.seq_model.config.initializer_range = 0.02
-        else:
-            self.seq_model = BertModel.from_pretrained(
-                seq_model_name,
-                add_pooling_layer=True,
-                hidden_dropout_prob = hidden_dropout_prob,
-                attention_probs_dropout_prob = attention_probs_dropout_prob,
-                )
-
-        self.smiles_model = BertModel.from_pretrained(
-            smiles_model_name,
+        self.smiles_model = BertModel(
+            BertConfig.from_dict(config.smiles_config),
             add_pooling_layer=True,
-            hidden_dropout_prob = hidden_dropout_prob,
-            attention_probs_dropout_prob = attention_probs_dropout_prob,
         )
 
-        smiles_config = self.smiles_model.config
-
-        if attn_mode != 'bert':
-            if seq_model_type == 'bert':
+        if config.attn_mode != 'bert':
+            if config.seq_model_type == 'bert':
                 # swap the self-attention layers
                 seq_layers = self.seq_model.encoder.layer
 
                 for layer in seq_layers:
-                    if attn_mode == 'hierarchical':
+                    if config.attn_mode == 'hierarchical':
                         attention = BertHAttention1D(
                             config=self.seq_model.config,
                             mask_mode='add',
-                            local_block_size=local_block_size,
+                            local_block_size=config.local_block_size,
                         )
-                    elif attn_mode == 'linear':
+                    elif config.attn_mode == 'linear':
                         attention = BertLinearAttention(
                             config=self.seq_model.config,
-                            query_chunk_size=query_chunk_size,
-                            key_chunk_size=key_chunk_size,
+                            query_chunk_size=config.query_chunk_size,
+                            key_chunk_size=config.key_chunk_size,
                         )
 
                     attention.query = layer.attention.self.query
@@ -367,17 +359,17 @@ class EnsembleEmbedding(torch.nn.Module):
 
             smiles_layers = self.smiles_model.encoder.layer
             for layer in smiles_layers:
-                if attn_mode == 'hierarchical':
+                if config.attn_mode == 'hierarchical':
                     attention = BertHAttention1D(
-                        config=smiles_config,
+                        config=self.smiles_model.config,
                         mask_mode='add',
-                        local_block_size=local_block_size,
+                        local_block_size=config.local_block_size,
                     )
-                elif attn_mode == 'linear':
+                elif config.attn_mode == 'linear':
                     attention = BertLinearAttention(
-                        config=smiles_config,
-                        query_chunk_size=query_chunk_size,
-                        key_chunk_size=key_chunk_size,
+                        config=self.smiles_model.config,
+                        query_chunk_size=config.query_chunk_size,
+                        key_chunk_size=config.key_chunk_size,
                     )
 
                 attention.query = layer.attention.self.query
@@ -434,36 +426,30 @@ class MLP(torch.nn.Module):
     '''
     Multilayer Perceptron.
     '''
-    def __init__(self,ninput):
+    def __init__(self, ninput, nlayers, nhidden):
         super().__init__()
-        nhidden = 1000
+        hidden_layers = [(torch.nn.Linear(nhidden, nhidden),torch.nn.GELU())
+            for _ in range(nlayers-1)]
         self.layers = torch.nn.Sequential(
-               torch.nn.Linear(ninput, nhidden),
+               torch.nn.Linear(ninput,nhidden),
                torch.nn.GELU(),
-               torch.nn.Linear(nhidden, nhidden),
-               torch.nn.GELU(),
-               torch.nn.Linear(nhidden, nhidden),
-               torch.nn.GELU(),
+               *[item for layer_pair in hidden_layers for item in layer_pair],
                torch.nn.Linear(nhidden, 1)
-#        torch.nn.Linear(ninput, 1)
         )
 
     def forward(self, x):
         '''Forward pass'''
         return self.layers(x)
 
-class ProteinLigandAffinity(EnsembleEmbedding):
-    def __init__(self,
-            seq_model_name,
-            smiles_model_name,
-            **kwargs
-            ):
-        super().__init__(
-            seq_model_name,
-            smiles_model_name,
-            **kwargs)
+class ProteinLigandAffinityMLP(PreTrainedModel):
+    config_class = ProteinLigandConfig
+    supports_gradient_checkpointing = True
+    base_model_prefix = "embedding" # without this the pre-trained weights won't load
 
-        self.cls = MLP(self.hidden_size)
+    def __init__(self, config):
+        super().__init__(config)
+        self.embedding = EnsembleEmbedding(config) 
+        self.cls = MLP(self.embedding.hidden_size, config.n_layers, config.n_hidden_mlp)
 
     def forward(
             self,
@@ -476,7 +462,7 @@ class ProteinLigandAffinity(EnsembleEmbedding):
             labels=None,
             output_attentions=False,
     ):
-        embedding = super().forward(
+        embedding = self.embedding(
             input_ids_1=input_ids_1,
             inputs_embeds_1=inputs_embeds_1,
             attention_mask_1=attention_mask_1,
@@ -488,12 +474,15 @@ class ProteinLigandAffinity(EnsembleEmbedding):
 
         logits = self.cls(embedding)
 
-        # convert to float32 at the end to work around bug with MPI backend
-        logits = logits.type(torch.float32)
-
         if labels is not None:
             loss_fct = torch.nn.MSELoss()
             loss = loss_fct(logits.view(-1, 1), labels.view(-1,1).type(logits.dtype))
             return (loss, logits)
         else:
             return logits
+
+    def gradient_checkpointing_enable(self):
+        self.embedding.gradient_checkpointing_enable()
+
+    def gradient_checkpointing_disable(self):
+        self.embedding.gradient_checkpointing_disable()

@@ -1,3 +1,4 @@
 from affinity_pred.data_utils import EnsembleDataCollatorWithPadding
+from affinity_pred.data_utils import EnsembleTokenizer
 from affinity_pred.ensemble_embedding import EnsembleEmbedding
 from affinity_pred.ensemble_embedding import ProteinLigandAffinity

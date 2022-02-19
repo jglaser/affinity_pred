@@ -26,3 +26,23 @@ class EnsembleDataCollatorWithPadding:
         batch_merged['input_ids_2'] = batch_2['input_ids']
         batch_merged['attention_mask_2'] = batch_2['attention_mask']
         return batch_merged
+
+class EnsembleTokenizer:
+    def __init__(self,
+                 smiles_tokenizer,
+                 seq_tokenizer,
+    ):
+        self.smiles_tokenizer = smiles_tokenizer
+        self.seq_tokenizer = seq_tokenizer
+
+    def __call__(self, features):
+        item = {}
+        seq_encodings = self.seq_tokenizer(features['seq'])
+        item['input_ids_1'] = seq_encodings['input_ids']
+        item['attention_mask_1'] = seq_encodings['attention_mask']
+
+        smiles_encodings = self.smiles_tokenizer(features['smiles_canonical'])
+        item['input_ids_2'] = smiles_encodings['input_ids']
+        item['attention_mask_2'] = smiles_encodings['attention_mask']
+
+        return item

@@ -444,6 +444,7 @@ class MLP(torch.nn.Module):
 class ProteinLigandAffinityMLP(PreTrainedModel):
     config_class = ProteinLigandConfig
     supports_gradient_checkpointing = True
+    base_model_prefix = "embedding" # without this the pre-trained weights won't load
 
     def __init__(self, config):
         super().__init__(config)

@@ -1,31 +1,29 @@
 #!/usr/bin/env bash
 #BSUB -P BIF136
-#BSUB -W 12:00
+#BSUB -W 24:00
 #BSUB -q batch
-#BSUB -nnodes 360
-#BSUB -J finetune
+#BSUB -nnodes 4096
+#BSUB -J "finetune[1]"
 #BSUB -o finetune.o%J
 #BSUB -e finetune.e%J
 ##BSUB -w "done(1736296)"
 
-export NENSEMBLE=6
+export NENSEMBLE=4
 
 #module load cuda/11.0.3
-#export CUDA_HOME=${CUDA_TOOLKIT_ROOT_DIR}
 module load gcc/9.3.0
 module load open-ce/1.5.0-py39-0
 conda activate /gpfs/alpine/bif136/world-shared/env-summit
-
-
 export HF_HOME=/gpfs/alpine/world-shared/bip214/affinity_pred/train
 export HF_DATASETS_CACHE=/gpfs/alpine/world-shared/bip214/affinity_pred/train/dataset-cache
 export TORCH_EXTENSIONS_DIR=/gpfs/alpine/world-shared/bip214/affinity_pred/train/build
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
 
 # undo some conda env variables
 export CC=`which gcc`
 export GCC=`which gcc`
 export CXX=`which g++`
-
 export OMP_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
@@ -34,54 +32,62 @@ export NNODES=`echo $LSB_MCPU_HOSTS | awk '{for (j=3; j <= NF; j+=2) { print $j 
 export NNODES=$((${NNODES}/${NENSEMBLE}))
 export NWORKERS=$((${NNODES}*6))
 
-export NLAYERS=1
-export LR=5e-5
+export GIT_COMMIT=`git rev-parse HEAD`
+export NLAYERS=3
+export LR=3e-5
 export DATASET=no_kras
-export MAX_SEQ_LENGTH=1024
-export ATTN_MODE=linear
-export HATTENTION_BLOCKSIZE=512
-export PER_DEVICE_BATCH_SIZE=1
+export MAX_SEQ_LENGTH=2048
+export ATTN_MODE=bert
+export HATTENTION_BLOCKSIZE=64
+export PER_DEVICE_BATCH_SIZE=2
 export CLUSTER=summit
 export BATCH_SIZE=$((${PER_DEVICE_BATCH_SIZE}*${NWORKERS}))
+export FP16=False
+export SCHEDULER_TYPE=constant_with_warmup
+export SEQ_MODEL=bert
 
 for ENSEMBLE_ID in `seq 1 ${NENSEMBLE}`; do
+    export GLOBAL_ID=$(((${LSB_JOBINDEX}-1)*${NENSEMBLE}+${ENSEMBLE_ID}))
     if [ "$HATTN_MODE" = "hierarchical" ]; then
-        export ID_STR=${CLUSTER}_attn_${ATTN_MODE}_${HATTENTION}_${HATTENTION_BLOCKSIZE}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}
+        export ID_STR=${CLUSTER}_git_${GIT_COMMIT}_seq_${SEQ_MODEL}_attn_${ATTN_MODE}_${HATTENTION_BLOCKSIZE}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_fp16_${FP16}_scheduler_${SCHEDULER_TYPE}_${GLOBAL_ID}
     else
-        export ID_STR=${CLUSTER}_attn_${ATTN_MODE}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}
+        export ID_STR=${CLUSTER}_git_${GIT_COMMIT}_seq_${SEQ_MODEL}_attn_${ATTN_MODE}_bs${BATCH_SIZE}_regex_${NLAYERS}cross_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_fp16_${FP16}_scheduler_${SCHEDULER_TYPE}_${GLOBAL_ID}
     fi
 
     export LD_PRELOAD="${OLCF_GCC_ROOT}/lib64/libstdc++.so.6"
-    jsrun -n ${NWORKERS} -g 1 -a 1 -c 7 --smpiargs='-gpu' python ../affinity_pred/finetune.py \
-    --deepspeed='ds_config_rocm.json'\
+    jsrun -n ${NWORKERS} -g 1 -a 1 -c 7 --smpiargs="-gpu" python ../affinity_pred/finetune.py \
     --smiles_tokenizer_dir='/gpfs/alpine/world-shared/med106/blnchrd/models/bert_large_plus_clean_regex/tokenizer'\
     --smiles_model_dir='/gpfs/alpine/world-shared/med106/blnchrd/automatedmutations/pretraining/run/job_86neeM/output'\
     --model_type='regex' \
     --seq_model_name='Rostlab/prot_bert_bfd'\
+    --seq_model_type=${SEQ_MODEL}\
     --dataset='/gpfs/alpine/world-shared/bip214/binding_affinity'\
     --split=${DATASET}\
     --n_cross_attention=${NLAYERS}\
     --attn_mode=${ATTN_MODE}\
     --local_block_size=${HATTENTION_BLOCKSIZE}\
+    --attn_query_chunk_size=512\
+    --attn_key_chunk_size=512\
     --max_seq_length=${MAX_SEQ_LENGTH}\
-    --seq_chunk_size=512\
     --output_dir=./results_${ID_STR}\
-    --num_train_epochs=45\
+    --max_steps=5500\
     --per_device_train_batch_size=${PER_DEVICE_BATCH_SIZE}\
     --per_device_eval_batch_size=${PER_DEVICE_BATCH_SIZE}\
     --learning_rate=${LR}\
-    --weight_decay=0.01\
-    --warmup_steps=5\
+    --weight_decay=0\
     --logging_dir=./logs_${ID_STR}\
     --logging_steps=1\
+    --lr_scheduler_type=${SCHEDULER_TYPE}\
     --evaluation_strategy="steps"\
-    --eval_steps=500\
+    --eval_steps=100\
     --gradient_accumulation_steps=1\
-    --fp16=True\
+    --fp16=${FP16}\
     --run_name="seq_smiles_affinity"\
     --save_strategy="steps"\
-    --save_steps=500\
-    --seed=$((42+${ENSEMBLE_ID})) &
+    --save_steps=100\
+    --warmup_steps=10\
+    --gradient_checkpointing\
+    --hub_model_id='/gpfs/alpine/world-shared/bip214/affinity_mlp_${GLOBAL_ID}'\
+    --seed=$((42+${GLOBAL_ID})) &
 done
-
 wait

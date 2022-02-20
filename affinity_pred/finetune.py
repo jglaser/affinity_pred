@@ -14,7 +14,11 @@ from tokenizers.pre_tokenizers import Digits
 from tokenizers.pre_tokenizers import Sequence
 from tokenizers.pre_tokenizers import WhitespaceSplit
 from tokenizers.pre_tokenizers import Split
+
 from tokenizers import Regex
+from tokenizers import pre_tokenizers
+from tokenizers import normalizers
+from tokenizers.normalizers import Replace
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -30,25 +34,19 @@ import datasets
 from torch.utils.data import Dataset
 from torch.nn import functional as F
 
+from ensemble_embedding import ProteinLigandAffinityMLP, ProteinLigandConfig
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
-import torch_optimizer as optim
 
-import re
-import gc
 import os
 import json
-import pandas as pd
-import numpy as np
-import requests
 from tqdm.auto import tqdm
 
-import torch.multiprocessing as mp
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DD
 
-from ensemble_embedding import ProteinLigandAffinity
+from ensemble_embedding import ProteinLigandAffinityMLP
+from ensemble_embedding import ProteinLigandConfig
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +102,6 @@ def compute_metrics(p: EvalPrediction):
         "mse": mean_squared_error(out_label_list, preds_list),
         "mae": mean_absolute_error(out_label_list, preds_list),
     }
-
 
 @dataclass
 class ModelArguments:
@@ -172,8 +169,7 @@ class DataArguments:
 def main():
     # on-the-fly tokenization
     def encode(item):
-        seq_encodings = seq_tokenizer(expand_seqs(item['seq'])[0],
-                                 is_split_into_words=True,
+        seq_encodings = seq_tokenizer(item['seq'][0],
                                  return_offsets_mapping=False,
                                  truncation=True,
                                  padding='max_length',
@@ -194,10 +190,12 @@ def main():
 
         return item
 
-    if torch.distributed.is_mpi_available():
+    use_mpi = False
+    if torch.distributed.is_mpi_available() and 'OMPI_COMM_WORLD_RANK' in os.environ:
         torch.distributed.init_process_group(backend='mpi')
         if torch.distributed.get_rank() == 0:
             print('Using MPI backend with torch.distributed')
+        use_mpi = True
 
     parser = HfArgumentParser([TrainingArguments,ModelArguments, DataArguments])
 
@@ -205,7 +203,7 @@ def main():
 
     if 'LOCAL_RANK' in os.environ:
         training_args.local_rank = int(os.environ["LOCAL_RANK"])
-    else:
+    elif use_mpi:
         # now set the local task id to 0 to enable DDP
         training_args.local_rank = 0
 
@@ -221,15 +219,11 @@ def main():
     if model_args.model_type == 'regex':
         smiles_tokenizer.backend_tokenizer.pre_tokenizer = Sequence([WhitespaceSplit(),Split(Regex(r"""(\[[^\]]+]|Br?|Cl?|N|O|S|P|F|I|b|c|n|o|s|p|\(|\)|\.|=|#|-|\+|\\|\/|:|~|@|\?|>>?|\*|\$|\%[0-9]{2}|[0-9])"""), behavior='isolated')])
 
-    if model_args.seq_model_type == 'bert':
-        # this logic is necessary because online-downloading and caching doesn't seem to work
-        if os.path.exists('seq_tokenizer'):
-            seq_tokenizer = BertTokenizer.from_pretrained('seq_tokenizer/', do_lower_case=False)
-        else:
-            seq_tokenizer = BertTokenizer.from_pretrained(model_args.seq_model_name, do_lower_case=False)
-            seq_tokenizer.save_pretrained('seq_tokenizer/')
-    else:
-        seq_tokenizer = T5Tokenizer.from_pretrained(model_args.seq_model_name, do_lower_case=False )
+    normalizer = normalizers.Sequence([Replace(Regex('[UZOB]'),'X'),Replace(Regex('\s'),'')])
+    pre_tokenizer = pre_tokenizers.Split(Regex(''),behavior='isolated')
+    seq_tokenizer = AutoTokenizer.from_pretrained(model_args.seq_model_name, do_lower_case=False)
+    seq_tokenizer.backend_tokenizer.normalizer = normalizer
+    seq_tokenizer.backend_tokenizer.pre_tokenizer = pre_tokenizer
 
     max_seq_length = model_args.max_seq_length
     max_smiles_length = min(smiles_tokenizer.model_max_length, model_args.max_smiles_length)
@@ -279,28 +273,16 @@ def main():
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
             )
 
-    # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO if is_main_process(training_args.local_rank) in [-1, 0] else logging.WARN,
-    )
-    logger.warning(
-        "Process local rank: %s, world size: %d, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s",
-        training_args.local_rank,
-        training_args.world_size,
-        training_args.device,
-        training_args.n_gpu,
-        bool(training_args.parallel_mode == transformers.training_args.ParallelMode.DISTRIBUTED),
-        training_args.fp16,
-    )
-    if training_args.local_rank == 0:
-        transformers.utils.logging.set_verbosity_info()
-    logger.info("Training/evaluation parameters %s", training_args)
+    seq_config = BertConfig.from_pretrained(model_args.seq_model_name)
 
-    model = ProteinLigandAffinity(
-        model_args.seq_model_name,
-        smiles_model_directory,
+    smiles_config = BertConfig.from_pretrained(smiles_model_directory)
+    smiles_config.hidden_dropout_prob=0
+    smiles_config.attention_probs_dropout_prob=0
+    seq_config.hidden_dropout_prob = 0
+    seq_config.attention_probs_dropout_prob = 0
+    config = ProteinLigandConfig(
+        seq_config=seq_config,
+        smiles_config=smiles_config,
         seq_model_type=model_args.seq_model_type,
         n_layers=model_args.n_cross_attention,
         attn_mode=model_args.attn_mode,
@@ -309,18 +291,20 @@ def main():
         key_chunk_size=model_args.attn_key_chunk_size,
     )
 
+    model = ProteinLigandAffinityMLP(config)
+
     trainer = Trainer(
         model=model,
         args=training_args,                   # training arguments, defined above
         train_dataset=train_dataset,          # training dataset
         eval_dataset=val_dataset,             # evaluation dataset
-        compute_metrics = compute_metrics,    # evaluation metric
     )
 
     all_metrics = {}
     logger.info("*** Train ***")
     train_result = trainer.train(resume_from_checkpoint=last_checkpoint)
-    trainer.save_model(training_args.output_dir)  # this also saves the tokenizer
+
+    trainer.save_model(training_args.output_dir)
     metrics = train_result.metrics
 
     if trainer.is_world_process_zero():
@@ -330,7 +314,19 @@ def main():
         trainer.state.save_to_json(os.path.join(training_args.output_dir, "trainer_state.json"))
         save_json(all_metrics, os.path.join(training_args.output_dir, "all_results.json"))
 
-    return all_metrics
+#        # create the repo
+#        trainer.push_to_hub()
+#        seq_tokenizer.save_pretrained(training_args.hub_model_id+'/seq_tokenizer')
+#        smiles_tokenizer.save_pretrained(training_args.hub_model_id+'/smiles_tokenizer')
+#
+#        model_card_args = {
+#            'language': 'protein, SMILES',
+#            'tags': 'protein ligand affinity prediction',
+#            'finetuned_from': model_args.seq_model_name +',' + model_args.smiles_model_dir,
+#            'dataset': data_args.dataset,
+#            'dataset_args': data_args.split,
+#        }
+#        trainer.push_to_hub(**model_card_args)
 
 if __name__ == "__main__":
     main()

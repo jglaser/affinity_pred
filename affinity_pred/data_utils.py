@@ -50,18 +50,29 @@ class EnsembleTokenizer:
 
         is_batched = isinstance(features, (list, tuple))
 
+        seq_args = {}
+        smiles_args = {}
+        if 'seq_max_length' in kwargs:
+            seq_args['max_length'] = kwargs['seq_max_length']
+        if 'smiles_max_length' in kwargs:
+            smiles_args['max_length'] = kwargs['smiles_max_length']
+        if 'seq_truncation' in kwargs:
+            seq_args['truncation'] = kwargs['seq_truncation']
+        if 'smiles_truncation' in kwargs:
+            smiles_args['truncation'] = kwargs['smiles_truncation']
+
         if is_batched:
-            seq_encodings = self.seq_tokenizer([f['seq'] for f in features])
+            seq_encodings = self.seq_tokenizer([f['seq'] for f in features], **seq_args)
         else:
-            seq_encodings = self.seq_tokenizer(features['seq'], **kwargs)
+            seq_encodings = self.seq_tokenizer(features['seq'], **seq_args)
 
         item['input_ids_1'] = seq_encodings['input_ids']
         item['attention_mask_1'] = seq_encodings['attention_mask']
 
         if is_batched:
-            smiles_encodings = self.smiles_tokenizer([f['smiles_canonical'] for f in features], **kwargs)
+            smiles_encodings = self.smiles_tokenizer([f['smiles_canonical'] for f in features], **smiles_args)
         else:
-            smiles_encodings = self.smiles_tokenizer(features['smiles_canonical'], **kwargs)
+            smiles_encodings = self.smiles_tokenizer(features['smiles_canonical'], **smiles_args)
 
         item['input_ids_2'] = smiles_encodings['input_ids']
         item['attention_mask_2'] = smiles_encodings['attention_mask']
@@ -71,6 +82,18 @@ class EnsembleTokenizer:
 class ProteinLigandScoring(Pipeline):
     def _sanitize_parameters(self, **kwargs):
         preprocess_kwargs = {}
+        if 'seq_truncation' in kwargs:
+            preprocess_kwargs['seq_truncation'] = kwargs['seq_truncation']
+
+        if 'seq_max_length' in kwargs:
+            preprocess_kwargs['seq_max_length'] = kwargs['seq_max_length']
+
+        if 'smiles_truncation' in kwargs:
+            preprocess_kwargs['smiles_truncation'] = kwargs['smiles_truncation']
+
+        if 'smiles_max_length' in kwargs:
+            preprocess_kwargs['smiles_max_length'] = kwargs['smiles_max_length']
+
         return preprocess_kwargs, {}, {}
 
     def __init__(self,
@@ -88,8 +111,8 @@ class ProteinLigandScoring(Pipeline):
                                                     self.seq_tokenizer),
                          **kwargs)
         
-    def preprocess(self, inputs):
-        tokenized_input = self.tokenizer(inputs)#, return_tensors=self.framework) 
+    def preprocess(self, inputs, **kwargs):
+        tokenized_input = self.tokenizer(inputs, **kwargs)
         return tokenized_input
 
     def _forward(self, model_inputs):

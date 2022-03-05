@@ -15,8 +15,6 @@ class ProteinLigandConfig(PretrainedConfig):
         seq_config=BertConfig(),
         smiles_config=BertConfig(),
         seq_model_type = 'bert',
-        n_layers=3,
-        n_hidden_mlp=1000,
         attn_mode='bert',
         local_block_size=512,
         query_chunk_size=2048,
@@ -33,13 +31,43 @@ class ProteinLigandConfig(PretrainedConfig):
             self.seq_config = self.seq_config.to_dict()
 
         self.seq_model_type = seq_model_type
-        self.n_layers = n_layers
-        self.n_hidden_mlp = n_hidden_mlp
         self.attn_mode = attn_mode
         self.local_block_size = local_block_size
         self.query_chunk_size = query_chunk_size
         self.key_chunk_size = key_chunk_size
         super().__init__(**kwargs)
+
+class ProteinLigandConfigMLP(ProteinLigandConfig):
+    def __init__(
+        self,
+        n_layers=3,
+        n_hidden_mlp=1000,
+        **kwargs
+    ):
+
+        self.n_layers = n_layers
+        self.n_hidden_mlp = n_hidden_mlp
+        super().__init__(**kwargs)
+
+class ProteinLigandConfigCosine(ProteinLigandConfig):
+    def __init__(
+        self,
+        n_hidden=None,
+        scale_logits=15.0,
+        offset_logits=1.0,
+        **kwargs
+    ):
+
+        super().__init__(**kwargs)
+
+        if n_hidden is None:
+            # choose a common vector space dimension that can accomodate both sub-spaces
+            n_hidden = self.seq_config['hidden_size'] + self.smiles_config['hidden_size']
+
+        self.n_hidden = n_hidden
+        self.scale_logits = scale_logits
+        self.offset_logits = offset_logits
+
 
 # wrapper class for HAttention1D
 class BertHAttention1D(nn.Module):
@@ -391,6 +419,13 @@ class EnsembleEmbedding(torch.nn.Module):
         self.seq_model.gradient_checkpointing_disable()
         self.smiles_model.gradient_checkpointing_disable()
 
+    def load_pretrained(self, seq_model_name, smiles_model_name):
+        seq_model = BertModel.from_pretrained(seq_model_name)
+        self.seq_model.load_state_dict(seq_model.state_dict(), strict=False)
+
+        smiles_model = BertModel.from_pretrained(smiles_model_name)
+        self.smiles_model.load_state_dict(smiles_model.state_dict(), strict=False)
+
     def forward(
             self,
             input_ids_1=None,
@@ -409,6 +444,7 @@ class EnsembleEmbedding(torch.nn.Module):
             inputs_embeds=inputs_embeds_1,
             attention_mask=attention_mask_1,
         )
+        hidden_seq = encoder_outputs.last_hidden_state
         pooled_seq = encoder_outputs.pooler_output
 
         # encode SMILES
@@ -417,10 +453,11 @@ class EnsembleEmbedding(torch.nn.Module):
             inputs_embeds=inputs_embeds_2,
             attention_mask=attention_mask_2,
         )
+        hidden_smiles = encoder_outputs.last_hidden_state
         pooled_smiles = encoder_outputs.pooler_output
 
         # concatenate the outputs
-        return torch.cat([pooled_seq, pooled_smiles], dim=1)
+        return pooled_seq, pooled_smiles
 
 class MLP(torch.nn.Module):
     '''
@@ -442,13 +479,13 @@ class MLP(torch.nn.Module):
         return self.layers(x)
 
 class ProteinLigandAffinityMLP(PreTrainedModel):
-    config_class = ProteinLigandConfig
+    config_class = ProteinLigandConfigMLP
     supports_gradient_checkpointing = True
     base_model_prefix = "embedding" # without this the pre-trained weights won't load
 
     def __init__(self, config):
         super().__init__(config)
-        self.embedding = EnsembleEmbedding(config) 
+        self.embedding = EnsembleEmbedding(config)
         self.cls = MLP(self.embedding.hidden_size, config.n_layers, config.n_hidden_mlp)
 
     def forward(
@@ -471,8 +508,7 @@ class ProteinLigandAffinityMLP(PreTrainedModel):
             attention_mask_2=attention_mask_2,
             output_attentions=output_attentions
         )
-
-        logits = self.cls(embedding)
+        logits = self.cls(torch.cat([embedding[0], embedding[1]], dim=1))
 
         if labels is not None:
             loss_fct = torch.nn.MSELoss()
@@ -486,3 +522,53 @@ class ProteinLigandAffinityMLP(PreTrainedModel):
 
     def gradient_checkpointing_disable(self):
         self.embedding.gradient_checkpointing_disable()
+
+class ProteinLigandAffinityCosine(PreTrainedModel):
+    config_class = ProteinLigandConfigCosine
+    supports_gradient_checkpointing = True
+    base_model_prefix = "embedding" # without this the pre-trained weights won't load
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.embedding = EnsembleEmbedding(config)
+        self.linear_seq = torch.nn.Linear(config.seq_config['hidden_size'], config.n_hidden)
+        self.linear_smiles = torch.nn.Linear(config.smiles_config['hidden_size'], config.n_hidden)
+
+    def forward(
+            self,
+            input_ids_1=None,
+            inputs_embeds_1=None,
+            attention_mask_1=None,
+            input_ids_2=None,
+            inputs_embeds_2=None,
+            attention_mask_2=None,
+            labels=None,
+            output_attentions=False,
+    ):
+        embedding = self.embedding(
+            input_ids_1=input_ids_1,
+            inputs_embeds_1=inputs_embeds_1,
+            attention_mask_1=attention_mask_1,
+            input_ids_2=input_ids_2,
+            inputs_embeds_2=inputs_embeds_2,
+            attention_mask_2=attention_mask_2,
+            output_attentions=output_attentions
+        )
+
+        # dot product (cosine similarity)
+        logits = torch.nn.CosineSimilarity(dim=-1)(self.linear_seq(embedding[0]),self.linear_smiles(embedding[1]))
+        logits = (logits+self.config.offset_logits)*self.config.scale_logits
+
+        if labels is not None:
+            loss_fct = torch.nn.MSELoss()
+            loss = loss_fct(logits.view(-1, 1), labels.view(-1,1).type(logits.dtype))
+            return (loss, logits)
+        else:
+            return logits
+
+    def gradient_checkpointing_enable(self):
+        self.embedding.gradient_checkpointing_enable()
+
+    def gradient_checkpointing_disable(self):
+        self.embedding.gradient_checkpointing_disable()
+

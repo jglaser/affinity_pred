@@ -34,7 +34,7 @@ import datasets
 from torch.utils.data import Dataset
 from torch.nn import functional as F
 
-from ensemble_embedding import ProteinLigandAffinityMLP, ProteinLigandConfig
+from ensemble_embedding import ProteinLigandAffinityCosine, ProteinLigandConfigCosine
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
@@ -80,8 +80,7 @@ class AffinityDataset(Dataset):
     def __getitem__(self, idx):
         item = self.dataset[idx]
         #affinity = item['neg_log10_affinity_M']
-        affinity = float(item['affinity'])
-        item['labels'] = float(affinity)
+        item['labels'] = float(item['neg_log10_affinity_M'])
 
         # drop the non-encoded input
         item.pop('smiles_can')
@@ -124,10 +123,6 @@ class ModelArguments:
 
     smiles_tokenizer_dir: str = field(
         default=None
-    )
-
-    n_cross_attention: int = field(
-        default=3
     )
 
     max_seq_length: int = field(
@@ -280,18 +275,20 @@ def main():
     smiles_config.attention_probs_dropout_prob=0
     seq_config.hidden_dropout_prob = 0
     seq_config.attention_probs_dropout_prob = 0
-    config = ProteinLigandConfig(
+    config = ProteinLigandConfigCosine(
         seq_config=seq_config,
         smiles_config=smiles_config,
         seq_model_type=model_args.seq_model_type,
-        n_layers=model_args.n_cross_attention,
         attn_mode=model_args.attn_mode,
         local_block_size=model_args.local_block_size,
         query_chunk_size=model_args.attn_query_chunk_size,
         key_chunk_size=model_args.attn_key_chunk_size,
     )
 
-    model = ProteinLigandAffinityMLP(config)
+    model = ProteinLigandAffinityCosine(config)
+
+    model.embedding.load_pretrained(model_args.seq_model_name,
+        model_args.smiles_model_dir)
 
     trainer = Trainer(
         model=model,

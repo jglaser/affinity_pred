@@ -95,11 +95,13 @@ class AffinityDataset(Dataset):
         return len(self.dataset)
 
 def compute_metrics(p: EvalPrediction):
+    from scipy.stats import spearmanr
     preds_list, out_label_list = p.predictions, p.label_ids
 
     return {
         "mse": mean_squared_error(out_label_list, preds_list),
         "mae": mean_absolute_error(out_label_list, preds_list),
+        "spearman_rho": spearmanr(out_label_list, preds_list).correlation,
     }
 
 @dataclass
@@ -295,6 +297,7 @@ def main():
         args=training_args,                   # training arguments, defined above
         train_dataset=train_dataset,          # training dataset
         eval_dataset=val_dataset,             # evaluation dataset
+        compute_metrics=compute_metrics,
     )
 
     all_metrics = {}

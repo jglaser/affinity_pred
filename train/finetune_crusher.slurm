@@ -4,7 +4,7 @@
 #SBATCH -o slurm-%j.out
 #SBATCH -t 2:00:00
 #SBATCH -p batch
-#SBATCH -N 96
+#SBATCH -N 120
 #SBATCH --array=1
 #SBATCH --ntasks-per-node=1
 
@@ -16,8 +16,9 @@ conda activate /gpfs/alpine/bip214/world-shared/crusher-env
 module load rocm/4.5.0
 module load gcc/11.2.0
 
-module load craype-accel-amd-gfx90a
-export MPICH_GPU_SUPPORT_ENABLED=1
+#module load craype-accel-amd-gfx90a
+#export MPICH_GPU_SUPPORT_ENABLED=1
+export MPICH_SMP_SINGLE_COPY_MODE=NONE
 
 export HF_HOME=/gpfs/alpine/world-shared/bip214/affinity_pred/train
 export HF_DATASETS_CACHE=/gpfs/alpine/world-shared/bip214/affinity_pred/train/dataset-cache
@@ -36,10 +37,11 @@ DATASET=no_kras
 MAX_SEQ_LENGTH=2048
 ATTN_MODE=bert
 PER_DEVICE_BATCH_SIZE=32
+PER_DEVICE_EVAL_BATCH_SIZE=32 # due to large size of logits
 CLUSTER=crusher
 BATCH_SIZE=$((${PER_DEVICE_BATCH_SIZE}*${SLURM_NTASKS}*8))
 
-ID_STR=${CLUSTER}_attn_${ATTN_MODE}_bs${BATCH_SIZE}_regex_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}
+ID_STR=${CLUSTER}_attn_${ATTN_MODE}_bs${BATCH_SIZE}_regex_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}_mlm
 
 srun -l /bin/hostname | sort -n
 
@@ -49,7 +51,7 @@ export LD_PRELOAD="/opt/cray/pe/gcc/11.2.0/snos/lib64/libstdc++.so.6 /gpfs/alpin
 export NCCL_ASYNC_ERROR_HANDLING=1
 MASTER_IP=`ip -f inet addr show hsn0 | sed -En -e 's/.*inet ([0-9.]+).*/\1/p' | head -1`:29400
 export NCCL_SOCKET_IFNAME=hsn0,hsn1,hsn2,hsn3
-export NCCL_DEBUG=INFO
+#export NCCL_DEBUG=INFO
 
 #export TORCH_DISTRIBUTED_DEBUG=INFO
 
@@ -66,7 +68,7 @@ srun -l -c 8 torchrun --nproc_per_node 8 --nnodes ${SLURM_NNODES} --rdzv_id=${SL
     --output_dir=./results_${ID_STR}\
     --num_train_epochs=45\
     --per_device_train_batch_size=${PER_DEVICE_BATCH_SIZE}\
-    --per_device_eval_batch_size=${PER_DEVICE_BATCH_SIZE}\
+    --per_device_eval_batch_size=${PER_DEVICE_EVAL_BATCH_SIZE}\
     --learning_rate=${LR}\
     --weight_decay=0.01\
     --warmup_steps=10\
@@ -75,10 +77,11 @@ srun -l -c 8 torchrun --nproc_per_node 8 --nnodes ${SLURM_NNODES} --rdzv_id=${SL
     --evaluation_strategy="steps"\
     --eval_steps=50\
     --gradient_accumulation_steps=1\
-    --fp16=True\
+    --fp16=False\
     --run_name="seq_smiles_affinity"\
     --save_strategy="steps"\
     --save_steps=50\
     --seed=$((42+${ENSEMBLE_ID})) \
     --gradient_checkpointing \
-    --lr_scheduler_type=constant_with_warmup
+    --lr_scheduler_type=constant_with_warmup \
+    --eval_accumulation_steps=1

@@ -97,28 +97,13 @@ def compute_metrics(p: EvalPrediction):
     from scipy.stats import spearmanr
     preds_list, out_label_list = p.predictions, p.label_ids
 
-    from sklearn.metrics import log_loss
-    from scipy.special import softmax
     import numpy as np
 
-    ignore_index = -100 # torch.nn.CrossEntropyLoss()
-
-    prediction_probs_seq = softmax(preds_list[1],axis=-1)
-    nlabels = prediction_probs_seq.shape[-1]
-    prediction_probs_seq = prediction_probs_seq.reshape(-1,nlabels)
-    label_ids = p.label_ids[1].reshape(-1)
-    prediction_probs_seq, label_ids = prediction_probs_seq[label_ids != ignore_index], label_ids[label_ids != ignore_index]
-    mlm_loss_seq = log_loss(label_ids, prediction_probs_seq, labels=np.arange(nlabels))
-
-    prediction_probs_smiles = softmax(preds_list[2],axis=-1)
-    nlabels = prediction_probs_smiles.shape[-1]
-    prediction_probs_smiles = prediction_probs_smiles.reshape(-1,nlabels)
-    label_ids = p.label_ids[2].reshape(-1)
-    prediction_probs_smiles, label_ids = prediction_probs_smiles[label_ids != ignore_index], label_ids[label_ids != ignore_index]
-    mlm_loss_smiles = log_loss(label_ids, prediction_probs_smiles, labels=np.arange(nlabels))
+    # output contains the partial losses, (mean-)reduce them
+    mse_loss, mlm_loss_seq, mlm_loss_smiles = np.mean(preds_list[1:4],axis=-1)
 
     return {
-        "mse": mean_squared_error(out_label_list[0], preds_list[0]),
+        "mse": mse_loss,
         "mae": mean_absolute_error(out_label_list[0], preds_list[0]),
         "spearman_rho": spearmanr(out_label_list[0], preds_list[0]).correlation,
         "mlm_loss_seq": mlm_loss_seq,
@@ -324,7 +309,26 @@ def main():
 
     training_args.label_names = ['labels', 'labels_1', 'labels_2']
 
-    trainer = Trainer(
+    class MultipleLossTrainer(Trainer):
+        def compute_loss(self, model, inputs, return_outputs=False):
+            labels = inputs.get("labels")
+
+            # forward pass without prediction scores
+            outputs = model(**inputs, output_prediction_scores=False)
+            losses, logits = outputs
+
+            # compute total loss and append partial losses to logits
+            loss = 0.0
+            if not isinstance(logits, (tuple, list)):
+                logits = (logits, )
+
+            for l in losses:
+                loss += l
+                logits += (l, )
+
+            return (loss, (loss, logits)) if return_outputs else loss
+
+    trainer = MultipleLossTrainer(
         model=model,
         args=training_args,                   # training arguments, defined above
         train_dataset=train_dataset,          # training dataset

@@ -645,8 +645,8 @@ class CrossAttentionMLMHead(torch.nn.Module):
         self.mlm.load_state_dict(model.cls.state_dict(), strict=True)
 
         # initialize cross attention weights to zero
-        self.dense.weight.data.zero_()
-        self.dense.bias.data.zero_()
+        torch.nn.init.zeros_(self.dense.weight)
+        torch.nn.init.zeros_(self.dense.bias)
 
 class ProteinLigandMLMAffinityMLP(PreTrainedModel):
     config_class = ProteinLigandConfigMLP
@@ -675,6 +675,7 @@ class ProteinLigandMLMAffinityMLP(PreTrainedModel):
             labels_1=None,
             labels_2=None,
             output_attentions=False,
+            output_prediction_scores=True,
     ):
         embedding = self.embedding(
             input_ids_1=input_ids_1,
@@ -710,11 +711,22 @@ class ProteinLigandMLMAffinityMLP(PreTrainedModel):
             masked_lm_loss_smiles = mlm_loss_fct(prediction_scores_smiles.view(-1, self.embedding.smiles_model.config.vocab_size), labels_2.view(-1))
 
             mse_loss = mse_loss_fct(logits.view(-1, 1), labels.view(-1,1).type(logits.dtype))
-            loss = mse_loss + masked_lm_loss_seq + masked_lm_loss_smiles
+            loss = (mse_loss, masked_lm_loss_seq, masked_lm_loss_smiles)
 
-            return (loss, (logits, prediction_scores_seq, prediction_scores_smiles))
+            outputs = (logits, )
+            if output_prediction_scores:
+                outputs += (prediction_scores_seq, prediction_scores_smiles)
+                return (loss, outputs)
+            else:
+                return loss, outputs[0]
         else:
-            return logits, prediction_scores_seq, prediction_scores_smiles
+            outputs = (logits, )
+            if output_prediction_scores:
+                outputs += (prediction_scores_seq, prediction_scores_smiles)
+                return outputs
+            else:
+                return outputs[0]
+
 
     def load_pretrained(self, seq_model_name, smiles_model_name):
         self.embedding.load_pretrained(seq_model_name,smiles_model_name)

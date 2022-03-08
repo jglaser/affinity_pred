@@ -1,7 +1,7 @@
 from transformers import DataCollatorWithPadding, default_data_collator, PreTrainedTokenizerBase
+from transformers.data.data_collator import default_data_collator, DataCollatorMixin, DataCollatorForLanguageModeling
 
 from transformers import Pipeline
-from transformers.pipelines.pt_utils import PipelineDataset, PipelineIterator
 
 from torch.utils.data import DataLoader
 
@@ -19,7 +19,7 @@ class EnsembleDataCollatorWithPadding:
                  smiles_max_length=None,
                  seq_padding=True,
                  seq_max_length=None):
-        
+
         self.smiles_collator = DataCollatorWithPadding(smiles_tokenizer, smiles_padding, smiles_max_length)
         self.seq_collator = DataCollatorWithPadding(seq_tokenizer, seq_padding, seq_max_length)
 
@@ -126,6 +126,7 @@ class ProteinLigandScoring(Pipeline):
     def get_iterator(
         self, inputs, num_workers: int, batch_size: int, preprocess_params, forward_params, postprocess_params
     ):
+        from transformers.pipelines.pt_utils import PipelineDataset, PipelineIterator
         if isinstance(inputs, collections.abc.Sized):
             dataset = PipelineDataset(inputs, self.preprocess, preprocess_params)
         else:
@@ -146,3 +147,50 @@ class ProteinLigandScoring(Pipeline):
         model_iterator = PipelineIterator(dataloader, self.forward, forward_params, loader_batch_size=batch_size)
         final_iterator = PipelineIterator(model_iterator, self.postprocess, postprocess_params)
         return final_iterator
+
+class ProteinLigandDataCollatorForLanguageModeling:
+    def __init__(self,
+        tokenizer_seq: PreTrainedTokenizerBase,
+        tokenizer_smiles: PreTrainedTokenizerBase,
+        mlm: bool = True,
+        mlm_probability_seq: float = 0.15,
+        mlm_probability_smiles: float = 0.15,
+    ):
+        self.collator_seq = DataCollatorForLanguageModeling(
+            tokenizer=tokenizer_seq,
+            mlm=mlm,
+            mlm_probability=mlm_probability_seq,
+            )
+
+        self.collator_smiles = DataCollatorForLanguageModeling(
+            tokenizer=tokenizer_smiles,
+            mlm=mlm,
+            mlm_probability=mlm_probability_smiles,
+            )
+
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # individually collate protein and ligand sequences into batches
+        batch_1 = self.collator_seq([{'input_ids': b['input_ids_1'],
+            'attention_mask': b['attention_mask_1'],
+            'special_tokens_mask': b['special_tokens_mask_1']} for b in features])
+        batch_2 = self.collator_smiles([{'input_ids': b['input_ids_2'],
+            'attention_mask': b['attention_mask_2'],
+            'special_tokens_mask': b['special_tokens_mask_2']} for b in features])
+
+        batch_merged = default_data_collator([{k: v for k,v in f.items()
+                                              if k not in ('input_ids_1',
+                                                           'attention_mask_1',
+                                                           'special_tokens_mask_1',
+                                                           'input_ids_2',
+                                                           'attention_mask_2',
+                                                           'special_tokens_mask_2',
+                                              )} for f in features])
+        batch_merged['input_ids_1'] = batch_1['input_ids']
+        batch_merged['attention_mask_1'] = batch_1['attention_mask']
+        batch_merged['labels_1'] = batch_1['labels']
+        batch_merged['input_ids_2'] = batch_2['input_ids']
+        batch_merged['attention_mask_2'] = batch_2['attention_mask']
+        batch_merged['labels_2'] = batch_2['labels']
+        return batch_merged
+
+

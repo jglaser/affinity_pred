@@ -5,7 +5,8 @@ import transformers
 from transformers import BertModel, BertTokenizer, T5Tokenizer, AutoTokenizer
 from transformers import PreTrainedModel, BertConfig
 from transformers import Trainer, TrainingArguments
-from transformers.data.data_collator import default_data_collator
+from data_utils import ProteinLigandDataCollatorForLanguageModeling
+from transformers import PreTrainedTokenizerBase
 from transformers.tokenization_utils_base import BatchEncoding
 from transformers import EvalPrediction
 
@@ -34,7 +35,6 @@ import datasets
 from torch.utils.data import Dataset
 from torch.nn import functional as F
 
-from ensemble_embedding import ProteinLigandAffinityCosine, ProteinLigandConfigCosine
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
@@ -45,8 +45,8 @@ from tqdm.auto import tqdm
 
 import torch.distributed as dist
 
-from ensemble_embedding import ProteinLigandAffinityMLP
-from ensemble_embedding import ProteinLigandConfig
+from ensemble_embedding import ProteinLigandMLMAffinityMLP
+from ensemble_embedding import ProteinLigandConfigMLP
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +79,7 @@ class AffinityDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        #affinity = item['neg_log10_affinity_M']
-        item['labels'] = float(item['neg_log10_affinity_M'])
+        item['labels'] = float(item['affinity'])
 
         # drop the non-encoded input
         item.pop('smiles_can')
@@ -98,10 +97,32 @@ def compute_metrics(p: EvalPrediction):
     from scipy.stats import spearmanr
     preds_list, out_label_list = p.predictions, p.label_ids
 
+    from sklearn.metrics import log_loss
+    from scipy.special import softmax
+    import numpy as np
+
+    ignore_index = -100 # torch.nn.CrossEntropyLoss()
+
+    prediction_probs_seq = softmax(preds_list[1],axis=-1)
+    nlabels = prediction_probs_seq.shape[-1]
+    prediction_probs_seq = prediction_probs_seq.reshape(-1,nlabels)
+    label_ids = p.label_ids[1].reshape(-1)
+    prediction_probs_seq, label_ids = prediction_probs_seq[label_ids != ignore_index], label_ids[label_ids != ignore_index]
+    mlm_loss_seq = log_loss(label_ids, prediction_probs_seq, labels=np.arange(nlabels))
+
+    prediction_probs_smiles = softmax(preds_list[2],axis=-1)
+    nlabels = prediction_probs_smiles.shape[-1]
+    prediction_probs_smiles = prediction_probs_smiles.reshape(-1,nlabels)
+    label_ids = p.label_ids[2].reshape(-1)
+    prediction_probs_smiles, label_ids = prediction_probs_smiles[label_ids != ignore_index], label_ids[label_ids != ignore_index]
+    mlm_loss_smiles = log_loss(label_ids, prediction_probs_smiles, labels=np.arange(nlabels))
+
     return {
-        "mse": mean_squared_error(out_label_list, preds_list),
-        "mae": mean_absolute_error(out_label_list, preds_list),
-        "spearman_rho": spearmanr(out_label_list, preds_list).correlation,
+        "mse": mean_squared_error(out_label_list[0], preds_list[0]),
+        "mae": mean_absolute_error(out_label_list[0], preds_list[0]),
+        "spearman_rho": spearmanr(out_label_list[0], preds_list[0]).correlation,
+        "mlm_loss_seq": mlm_loss_seq,
+        "mlm_loss_smiles": mlm_loss_smiles,
     }
 
 @dataclass
@@ -171,19 +192,23 @@ def main():
                                  truncation=True,
                                  padding='max_length',
                                  add_special_tokens=True,
-                                 max_length=max_seq_length)
+                                 max_length=max_seq_length,
+                                 return_special_tokens_mask=True)
 
         item['input_ids_1'] = [torch.tensor(seq_encodings['input_ids'])]
         item['attention_mask_1'] = [torch.tensor(seq_encodings['attention_mask'])]
+        item['special_tokens_mask_1'] = [torch.tensor(seq_encodings['special_tokens_mask'])]
 
         smiles_encodings = smiles_tokenizer(item['smiles_can'][0],
                                             padding='max_length',
                                             max_length=max_smiles_length,
                                             add_special_tokens=True,
-                                            truncation=True)
+                                            truncation=True,
+                                            return_special_tokens_mask=True)
 
         item['input_ids_2'] = [torch.tensor(smiles_encodings['input_ids'])]
         item['attention_mask_2'] = [torch.tensor(smiles_encodings['attention_mask'])]
+        item['special_tokens_mask_2'] = [torch.tensor(smiles_encodings['special_tokens_mask'])]
 
         return item
 
@@ -277,7 +302,7 @@ def main():
     smiles_config.attention_probs_dropout_prob=0
     seq_config.hidden_dropout_prob = 0
     seq_config.attention_probs_dropout_prob = 0
-    config = ProteinLigandConfigCosine(
+    config = ProteinLigandConfigMLP(
         seq_config=seq_config,
         smiles_config=smiles_config,
         seq_model_type=model_args.seq_model_type,
@@ -287,10 +312,17 @@ def main():
         key_chunk_size=model_args.attn_key_chunk_size,
     )
 
-    model = ProteinLigandAffinityCosine(config)
+    model = ProteinLigandMLMAffinityMLP(config)
 
-    model.embedding.load_pretrained(model_args.seq_model_name,
+    model.load_pretrained(model_args.seq_model_name,
         model_args.smiles_model_dir)
+
+    collator = ProteinLigandDataCollatorForLanguageModeling(
+        seq_tokenizer,
+        smiles_tokenizer,
+        )
+
+    training_args.label_names = ['labels', 'labels_1', 'labels_2']
 
     trainer = Trainer(
         model=model,
@@ -298,6 +330,7 @@ def main():
         train_dataset=train_dataset,          # training dataset
         eval_dataset=val_dataset,             # evaluation dataset
         compute_metrics=compute_metrics,
+        data_collator=collator,
     )
 
     all_metrics = {}

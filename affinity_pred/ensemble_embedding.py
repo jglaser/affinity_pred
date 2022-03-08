@@ -1,6 +1,7 @@
 from transformers import BertModel, BertConfig
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.models.bert.modeling_bert import BertAttention, BertIntermediate, BertOutput
+from transformers.models.bert.modeling_bert import BertOnlyMLMHead, BertForMaskedLM
 from transformers.modeling_utils import apply_chunking_to_forward
 
 import torch
@@ -457,7 +458,7 @@ class EnsembleEmbedding(torch.nn.Module):
         pooled_smiles = encoder_outputs.pooler_output
 
         # concatenate the outputs
-        return pooled_seq, pooled_smiles
+        return pooled_seq, pooled_smiles, hidden_seq, hidden_smiles
 
 class MLP(torch.nn.Module):
     '''
@@ -572,3 +573,156 @@ class ProteinLigandAffinityCosine(PreTrainedModel):
     def gradient_checkpointing_disable(self):
         self.embedding.gradient_checkpointing_disable()
 
+def get_extended_attention_mask(attention_mask, input_shape, device, dtype):
+    # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+    # ourselves in which case we just need to make it broadcastable to all heads.
+    if attention_mask.dim() == 3:
+        extended_attention_mask = attention_mask[:, None, :, :]
+    elif attention_mask.dim() == 2:
+       extended_attention_mask = attention_mask[:, None, None, :]
+    else:
+        raise ValueError(
+            f"Wrong shape for input_ids (shape {input_shape}) or attention_mask (shape {attention_mask.shape})"
+        )
+
+    # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
+    # masked positions, this operation will create a tensor which is 0.0 for
+    # positions we want to attend and -10000.0 for masked positions.
+    # Since we are adding it to the raw scores before the softmax, this is
+    # effectively the same as removing these entirely.
+    extended_attention_mask = extended_attention_mask.to(dtype=dtype)  # fp16 compatibility
+    extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+    return extended_attention_mask
+
+class CrossAttentionMLMHead(torch.nn.Module):
+    def __init__(self, config, config_other):
+        super().__init__()
+
+        self.attn = BertAttention(config)
+
+        attention_head_size = config.hidden_size // config.num_attention_heads
+        all_head_size = config.num_attention_heads * attention_head_size
+
+        attention_head_size_other = config_other.hidden_size // config_other.num_attention_heads
+        all_head_size_other = config_other.num_attention_heads * attention_head_size_other
+
+        # translation layers
+        self.attn.self.key = torch.nn.Linear(all_head_size_other, all_head_size)
+        self.attn.self.value = torch.nn.Linear(all_head_size_other, all_head_size)
+
+        # MLM head
+        self.dense = torch.nn.Linear(config.hidden_size, config.hidden_size)
+        self.mlm = BertOnlyMLMHead(config)
+
+    def forward(self,
+        hidden_states,
+        encoder_hidden_states,
+        encoder_attention_mask
+        ):
+
+        extended_attention_mask = get_extended_attention_mask(
+            encoder_attention_mask,
+            encoder_hidden_states.shape[:-1],
+            encoder_hidden_states.device,
+            encoder_hidden_states.dtype
+            )
+
+        attention_output = self.attn(
+            hidden_states=hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=extended_attention_mask,
+            )
+
+        attention_output = attention_output[0]
+
+        # skip connection to allow re-using pre-trained ML weights (with dense layer weights set to zero)
+        hidden_states = hidden_states + self.dense(attention_output)
+
+        return self.mlm(hidden_states)
+
+    def load_pretrained(self, model_name):
+        model = BertForMaskedLM.from_pretrained(model_name)
+        self.mlm.load_state_dict(model.cls.state_dict(), strict=True)
+
+        # initialize cross attention weights to zero
+        self.dense.weight.data.zero_()
+        self.dense.bias.data.zero_()
+
+class ProteinLigandMLMAffinityMLP(PreTrainedModel):
+    config_class = ProteinLigandConfigMLP
+    supports_gradient_checkpointing = True
+    base_model_prefix = "embedding" # without this the pre-trained weights won't load
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.embedding = EnsembleEmbedding(config)
+        self.cls = MLP(self.embedding.hidden_size, config.n_layers, config.n_hidden_mlp)
+
+        self.head_seq = CrossAttentionMLMHead(self.embedding.seq_model.config,
+            self.embedding.smiles_model.config)
+        self.head_smiles = CrossAttentionMLMHead(self.embedding.smiles_model.config,
+            self.embedding.seq_model.config)
+
+    def forward(
+            self,
+            input_ids_1=None,
+            inputs_embeds_1=None,
+            attention_mask_1=None,
+            input_ids_2=None,
+            inputs_embeds_2=None,
+            attention_mask_2=None,
+            labels=None,
+            labels_1=None,
+            labels_2=None,
+            output_attentions=False,
+    ):
+        embedding = self.embedding(
+            input_ids_1=input_ids_1,
+            inputs_embeds_1=inputs_embeds_1,
+            attention_mask_1=attention_mask_1,
+            input_ids_2=input_ids_2,
+            inputs_embeds_2=inputs_embeds_2,
+            attention_mask_2=attention_mask_2,
+            output_attentions=output_attentions
+        )
+
+        logits = self.cls(torch.cat([embedding[0], embedding[1]], dim=1))
+
+        hidden_seq, hidden_smiles = embedding[2:4]
+        prediction_scores_seq = self.head_seq(
+            hidden_seq,
+            hidden_smiles,
+            attention_mask_2,
+            )
+        prediction_scores_smiles = self.head_smiles(
+            hidden_smiles,
+            hidden_seq,
+            attention_mask_1,
+            )
+
+        if labels is not None:
+            if labels_1 is None or labels_2 is None:
+                raise ValueError("Need all labels, affinity + sequence tokens + smiles tokens")
+
+            mse_loss_fct = torch.nn.MSELoss()
+            mlm_loss_fct = torch.nn.CrossEntropyLoss()  # -100 index = padding token
+            masked_lm_loss_seq = mlm_loss_fct(prediction_scores_seq.view(-1, self.embedding.seq_model.config.vocab_size), labels_1.view(-1))
+            masked_lm_loss_smiles = mlm_loss_fct(prediction_scores_smiles.view(-1, self.embedding.smiles_model.config.vocab_size), labels_2.view(-1))
+
+            mse_loss = mse_loss_fct(logits.view(-1, 1), labels.view(-1,1).type(logits.dtype))
+            loss = mse_loss + masked_lm_loss_seq + masked_lm_loss_smiles
+
+            return (loss, (logits, prediction_scores_seq, prediction_scores_smiles))
+        else:
+            return logits, prediction_scores_seq, prediction_scores_smiles
+
+    def load_pretrained(self, seq_model_name, smiles_model_name):
+        self.embedding.load_pretrained(seq_model_name,smiles_model_name)
+        self.head_seq.load_pretrained(seq_model_name)
+        self.head_smiles.load_pretrained(smiles_model_name)
+
+    def gradient_checkpointing_enable(self):
+        self.embedding.gradient_checkpointing_enable()
+
+    def gradient_checkpointing_disable(self):
+        self.embedding.gradient_checkpointing_disable()

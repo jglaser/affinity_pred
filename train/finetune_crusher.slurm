@@ -41,7 +41,7 @@ PER_DEVICE_EVAL_BATCH_SIZE=32 # due to large size of logits
 CLUSTER=crusher
 BATCH_SIZE=$((${PER_DEVICE_BATCH_SIZE}*${SLURM_NTASKS}*8))
 
-ID_STR=${CLUSTER}_attn_${ATTN_MODE}_bs${BATCH_SIZE}_regex_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}_mlm
+ID_STR=${CLUSTER}_attn_${ATTN_MODE}_bs${BATCH_SIZE}_regex_lr${LR}_${DATASET}_seqlen${MAX_SEQ_LENGTH}_${ENSEMBLE_ID}_mlm_2
 
 srun -l /bin/hostname | sort -n
 
@@ -83,5 +83,4 @@ srun -l -c 8 torchrun --nproc_per_node 8 --nnodes ${SLURM_NNODES} --rdzv_id=${SL
     --save_steps=50\
     --seed=$((42+${ENSEMBLE_ID})) \
     --gradient_checkpointing \
-    --lr_scheduler_type=constant_with_warmup \
-    --eval_accumulation_steps=1
+    --lr_scheduler_type=constant_with_warmup

@@ -45,8 +45,8 @@ from tqdm.auto import tqdm
 
 import torch.distributed as dist
 
-from ensemble_embedding import ProteinLigandMLMAffinityMLP
-from ensemble_embedding import ProteinLigandConfigMLP
+from ensemble_embedding import ProteinLigandMLMAffinity
+from ensemble_embedding import ProteinLigandConfig
 
 logger = logging.getLogger(__name__)
 
@@ -287,7 +287,7 @@ def main():
     smiles_config.attention_probs_dropout_prob=0
     seq_config.hidden_dropout_prob = 0
     seq_config.attention_probs_dropout_prob = 0
-    config = ProteinLigandConfigMLP(
+    config = ProteinLigandConfig(
         seq_config=seq_config,
         smiles_config=smiles_config,
         seq_model_type=model_args.seq_model_type,
@@ -297,7 +297,7 @@ def main():
         key_chunk_size=model_args.attn_key_chunk_size,
     )
 
-    model = ProteinLigandMLMAffinityMLP(config)
+    model = ProteinLigandMLMAffinity(config)
 
     model.load_pretrained(model_args.seq_model_name,
         model_args.smiles_model_dir)

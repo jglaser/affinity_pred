@@ -1,6 +1,6 @@
 from transformers import BertModel, BertConfig
 from transformers import PreTrainedModel, PretrainedConfig
-from transformers.models.bert.modeling_bert import BertAttention, BertIntermediate, BertOutput
+from transformers.models.bert.modeling_bert import BertAttention, BertIntermediate, BertOutput, BertPooler
 from transformers.models.bert.modeling_bert import BertOnlyMLMHead, BertForMaskedLM
 from transformers.modeling_utils import apply_chunking_to_forward
 
@@ -343,7 +343,7 @@ class EnsembleEmbedding(torch.nn.Module):
 
     supports_gradient_checkpointing = True
 
-    def __init__(self, config):
+    def __init__(self, config, add_pooling_layer=True):
         super().__init__()
 
         self.gradient_checkpointing = False
@@ -353,12 +353,12 @@ class EnsembleEmbedding(torch.nn.Module):
 
         self.seq_model = BertModel(
             BertConfig.from_dict(config.seq_config),
-            add_pooling_layer=True,
+            add_pooling_layer=add_pooling_layer,
             )
 
         self.smiles_model = BertModel(
             BertConfig.from_dict(config.smiles_config),
-            add_pooling_layer=True,
+            add_pooling_layer=add_pooling_layer,
         )
 
         if config.attn_mode != 'bert':
@@ -635,33 +635,32 @@ class CrossAttentionMLMHead(torch.nn.Module):
 
         attention_output = attention_output[0]
 
-        # skip connection to allow re-using pre-trained ML weights (with dense layer weights set to zero)
+        # skip connection to allow re-using pre-trained ML weights (when dense layer weights are zero)
         hidden_states = hidden_states + self.dense(attention_output)
 
-        return self.mlm(hidden_states)
+        return self.mlm(hidden_states), attention_output
 
     def load_pretrained(self, model_name):
         model = BertForMaskedLM.from_pretrained(model_name)
         self.mlm.load_state_dict(model.cls.state_dict(), strict=True)
 
-        # initialize cross attention weights to zero
-        torch.nn.init.zeros_(self.dense.weight)
-        torch.nn.init.zeros_(self.dense.bias)
-
-class ProteinLigandMLMAffinityMLP(PreTrainedModel):
-    config_class = ProteinLigandConfigMLP
+class ProteinLigandMLMAffinity(PreTrainedModel):
+    config_class = ProteinLigandConfig
     supports_gradient_checkpointing = True
     base_model_prefix = "embedding" # without this the pre-trained weights won't load
 
     def __init__(self, config):
         super().__init__(config)
-        self.embedding = EnsembleEmbedding(config)
-        self.cls = MLP(self.embedding.hidden_size, config.n_layers, config.n_hidden_mlp)
+        self.embedding = EnsembleEmbedding(config, add_pooling_layer=False)
+        self.cls = torch.nn.Linear(self.embedding.hidden_size, 1)
 
         self.head_seq = CrossAttentionMLMHead(self.embedding.seq_model.config,
             self.embedding.smiles_model.config)
         self.head_smiles = CrossAttentionMLMHead(self.embedding.smiles_model.config,
             self.embedding.seq_model.config)
+
+        self.pooler_seq = BertPooler(self.embedding.seq_model.config)
+        self.pooler_smiles = BertPooler(self.embedding.smiles_model.config)
 
     def forward(
             self,
@@ -687,19 +686,24 @@ class ProteinLigandMLMAffinityMLP(PreTrainedModel):
             output_attentions=output_attentions
         )
 
-        logits = self.cls(torch.cat([embedding[0], embedding[1]], dim=1))
-
         hidden_seq, hidden_smiles = embedding[2:4]
-        prediction_scores_seq = self.head_seq(
-            hidden_seq,
-            hidden_smiles,
-            attention_mask_2,
+        (prediction_scores_seq, hidden_seq), (prediction_scores_smiles, hidden_smiles) = (
+            self.head_seq(
+                hidden_seq,
+                hidden_smiles,
+                attention_mask_2,
+                ),
+            self.head_smiles(
+                hidden_smiles,
+                hidden_seq,
+                attention_mask_1,
+                )
             )
-        prediction_scores_smiles = self.head_smiles(
-            hidden_smiles,
-            hidden_seq,
-            attention_mask_1,
-            )
+
+        pooled_seq = self.pooler_seq(hidden_seq)
+        pooled_smiles = self.pooler_smiles(hidden_smiles)
+
+        logits = self.cls(torch.cat([pooled_seq, pooled_smiles], dim=1))
 
         if labels is not None:
             if labels_1 is None or labels_2 is None:
@@ -726,7 +730,6 @@ class ProteinLigandMLMAffinityMLP(PreTrainedModel):
                 return outputs
             else:
                 return outputs[0]
-
 
     def load_pretrained(self, seq_model_name, smiles_model_name):
         self.embedding.load_pretrained(seq_model_name,smiles_model_name)

@@ -9,6 +9,7 @@ from typing import List, Dict, Any
 
 import os
 import collections
+from collections.abc import Iterable
 
 
 class EnsembleDataCollatorWithPadding:
@@ -23,7 +24,7 @@ class EnsembleDataCollatorWithPadding:
         self.smiles_collator = DataCollatorWithPadding(smiles_tokenizer, smiles_padding, smiles_max_length)
         self.seq_collator = DataCollatorWithPadding(seq_tokenizer, seq_padding, seq_max_length)
 
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def __call__(self, features):
         # individually collate protein and ligand sequences into batches
         batch_1 = self.seq_collator([{'input_ids': b['input_ids_1'], 'attention_mask': b['attention_mask_1']} for b in features])
         batch_2 = self.smiles_collator([{'input_ids': b['input_ids_2'], 'attention_mask': b['attention_mask_2']} for b in features])
@@ -48,7 +49,7 @@ class EnsembleTokenizer:
     def __call__(self, features, **kwargs):
         item = {}
 
-        is_batched = isinstance(features, (list, tuple))
+        is_batched = isinstance(features, Iterable) and not isinstance(features, dict)
 
         seq_args = {}
         smiles_args = {}
@@ -62,17 +63,17 @@ class EnsembleTokenizer:
             smiles_args['truncation'] = kwargs['smiles_truncation']
 
         if is_batched:
-            seq_encodings = self.seq_tokenizer([f['seq'] for f in features], **seq_args)
+            seq_encodings = self.seq_tokenizer([f['protein'] for f in features], **seq_args)
         else:
-            seq_encodings = self.seq_tokenizer(features['seq'], **seq_args)
+            seq_encodings = self.seq_tokenizer(features['protein'], **seq_args)
 
         item['input_ids_1'] = seq_encodings['input_ids']
         item['attention_mask_1'] = seq_encodings['attention_mask']
 
         if is_batched:
-            smiles_encodings = self.smiles_tokenizer([f['smiles_canonical'] for f in features], **smiles_args)
+            smiles_encodings = self.smiles_tokenizer([f['ligand'] for f in features], **smiles_args)
         else:
-            smiles_encodings = self.smiles_tokenizer(features['smiles_canonical'], **smiles_args)
+            smiles_encodings = self.smiles_tokenizer(features['ligand'], **smiles_args)
 
         item['input_ids_2'] = smiles_encodings['input_ids']
         item['attention_mask_2'] = smiles_encodings['attention_mask']
@@ -100,12 +101,15 @@ class ProteinLigandScoring(Pipeline):
         model,
         seq_tokenizer,
         smiles_tokenizer,
+        output_prediction_scores=False,
         **kwargs
         ):
         self.seq_tokenizer = seq_tokenizer
         self.smiles_tokenizer = smiles_tokenizer
         self.data_collator = EnsembleDataCollatorWithPadding(self.smiles_tokenizer,
                                                              self.seq_tokenizer)
+        self.output_prediction_scores = output_prediction_scores
+        model.eval()
         super().__init__(model=model,
                          tokenizer=EnsembleTokenizer(self.smiles_tokenizer,
                                                     self.seq_tokenizer),
@@ -116,7 +120,8 @@ class ProteinLigandScoring(Pipeline):
         return tokenized_input
 
     def _forward(self, model_inputs):
-        outputs = self.model(**model_inputs)
+        outputs = self.model(**model_inputs,
+                             output_prediction_scores=self.output_prediction_scores)
         return outputs
 
     def postprocess(self, model_outputs):
@@ -168,7 +173,7 @@ class ProteinLigandDataCollatorForLanguageModeling:
             mlm_probability=mlm_probability_smiles,
             )
 
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def __call__(self, features):
         # individually collate protein and ligand sequences into batches
         batch_1 = self.collator_seq([{'input_ids': b['input_ids_1'],
             'attention_mask': b['attention_mask_1'],

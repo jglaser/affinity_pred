@@ -598,7 +598,7 @@ class CrossAttentionMLMHead(torch.nn.Module):
     def __init__(self, config, config_other):
         super().__init__()
 
-        self.attn = BertAttention(config)
+        self.attn = BertSelfAttention(config)
 
         attention_head_size = config.hidden_size // config.num_attention_heads
         all_head_size = config.num_attention_heads * attention_head_size
@@ -607,8 +607,8 @@ class CrossAttentionMLMHead(torch.nn.Module):
         all_head_size_other = config_other.num_attention_heads * attention_head_size_other
 
         # translation layers
-        self.attn.self.key = torch.nn.Linear(all_head_size_other, all_head_size)
-        self.attn.self.value = torch.nn.Linear(all_head_size_other, all_head_size)
+        self.attn.key = torch.nn.Linear(all_head_size_other, all_head_size)
+        self.attn.value = torch.nn.Linear(all_head_size_other, all_head_size)
 
         # MLM head
         self.dense = torch.nn.Linear(config.hidden_size, config.hidden_size)
